@@ -430,6 +430,21 @@ void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2&
         }
     }
 
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        if (currentAnimation >= 0 && currentAnimation < static_cast<int>(animations.size()) &&
+            entryIdx >= 0 && entryIdx < static_cast<int>(animations[currentAnimation].entries.size())) {
+            const std::string& celName = animations[currentAnimation].entries[entryIdx].celName;
+            for (int celIdx = 0; celIdx < static_cast<int>(animationCels.size()); celIdx++) {
+                if (animationCels[celIdx].name == celName) {
+                    celEditingMode = true;
+                    editingCelIndex = celIdx;
+                    selectedOAMIndices.clear();
+                    break;
+                }
+            }
+        }
+    }
+
     if (ImGui::BeginPopupContextItem(entryButtonId)) {
         if (currentAnimation >= 0 && currentAnimation < animations.size()) {
             Animation& anim = animations[currentAnimation];
