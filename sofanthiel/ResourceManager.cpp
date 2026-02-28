@@ -1200,6 +1200,7 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
     int cropW = (bboxMaxX - bboxMinX) * scale;
     int cropH = (bboxMaxY - bboxMinY) * scale;
 
+    // fuck compression
     std::set<uint32_t> usedColors;
     for (const auto& entry : anim.entries) {
         const AnimationCel* cel = nullptr;
@@ -1212,14 +1213,32 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
             if (palIdx >= static_cast<int>(palettes.size())) continue;
             for (int ci = 1; ci < 16; ci++) {
                 const SDL_Color& clr = palettes[palIdx].colors[ci];
-                usedColors.insert((clr.r << 16) | (clr.g << 8) | clr.b);
+                usedColors.insert(((uint32_t)clr.r << 16) | ((uint32_t)clr.g << 8) | clr.b);
             }
         }
     }
 
-    int numColors = static_cast<int>(usedColors.size()) + 1; // transparent index
+    std::vector<uint32_t> paletteColors;
+    paletteColors.push_back(0); // transparency
+    std::unordered_map<uint32_t, uint8_t> colorToIndex;
+    for (uint32_t c : usedColors) {
+        if (paletteColors.size() >= 255) break;
+        colorToIndex[c] = static_cast<uint8_t>(paletteColors.size());
+        paletteColors.push_back(c);
+    }
+
+    int numColors = static_cast<int>(paletteColors.size());
     int bitDepth = 2;
     while ((1 << bitDepth) < numColors && bitDepth < 8) bitDepth++;
+
+    GifPalette gifPal = {};
+    gifPal.bitDepth = bitDepth;
+    for (size_t i = 1; i < paletteColors.size() && i < 256; i++) {
+        uint32_t c = paletteColors[i];
+        gifPal.r[i] = (c >> 16) & 0xFF;
+        gifPal.g[i] = (c >> 8) & 0xFF;
+        gifPal.b[i] = c & 0xFF;
+    }
 
     const double exportFrameRate = (frameRate > 0.0f) ? static_cast<double>(frameRate) : 60.0;
 
@@ -1309,16 +1328,22 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
 
         writer.firstFrame = false;
 
-        GifPalette pal;
-        GifMakePalette(NULL, frameBuffer.data(), cropW, cropH, bitDepth, false, &pal);
-        GifThresholdImage(NULL, frameBuffer.data(), writer.oldImage, cropW, cropH, &pal);
-
         for (int p = 0; p < cropW * cropH; p++) {
             if (frameBuffer[p * 4 + 3] == 0) {
                 writer.oldImage[p * 4 + 0] = 0;
                 writer.oldImage[p * 4 + 1] = 0;
                 writer.oldImage[p * 4 + 2] = 0;
                 writer.oldImage[p * 4 + 3] = kGifTransIndex;
+            } else {
+                uint32_t key = ((uint32_t)frameBuffer[p * 4 + 0] << 16) |
+                               ((uint32_t)frameBuffer[p * 4 + 1] << 8) |
+                               (uint32_t)frameBuffer[p * 4 + 2];
+                auto it = colorToIndex.find(key);
+                uint8_t palIdx = (it != colorToIndex.end()) ? it->second : 1;
+                writer.oldImage[p * 4 + 0] = gifPal.r[palIdx];
+                writer.oldImage[p * 4 + 1] = gifPal.g[palIdx];
+                writer.oldImage[p * 4 + 2] = gifPal.b[palIdx];
+                writer.oldImage[p * 4 + 3] = palIdx;
             }
         }
 
@@ -1328,11 +1353,12 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
         if (entryDelay < 1) entryDelay = 1;
         actualTimeCentiseconds += entryDelay;
 
-        GifWriteLzwImage(writer.f, writer.oldImage, 0, 0, cropW, cropH, entryDelay, &pal, 2);
+        GifWriteLzwImage(writer.f, writer.oldImage, 0, 0, cropW, cropH, entryDelay, &gifPal, 2);
     }
 
     GifEnd(&writer);
-    SDL_Log("Exported animation '%s' (%d frames, %dx%d, %d-bit) to GIF: %s",
-        anim.name.c_str(), totalFrames, cropW, cropH, bitDepth, path.c_str());
+    SDL_Log("Exported animation '%s' (%d frames, %dx%d, %d-bit, %d colors) to GIF: %s",
+        anim.name.c_str(), totalFrames, cropW, cropH, bitDepth,
+        static_cast<int>(paletteColors.size()), path.c_str());
     return true;
 }

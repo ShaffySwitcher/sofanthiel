@@ -50,11 +50,12 @@ bool Sofanthiel::init()
         SDL_DestroySurface(iconSurface);
     }
 
-    float displayScale = SDL_GetWindowDisplayScale(this->window);
-    if (displayScale <= 0.0f) {
-        displayScale = 1.0f;
-    }
-    SDL_Log("Display scale factor: %.2f", displayScale);
+    int logicalW = 0, pixelW = 0;
+    SDL_GetWindowSize(this->window, &logicalW, nullptr);
+    SDL_GetWindowSizeInPixels(this->window, &pixelW, nullptr);
+    float displayScale = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
+    if (displayScale < 1.0f) displayScale = 1.0f;
+    SDL_Log("Display scale factor: %.2f (logical %d, pixel %d)", displayScale, logicalW, pixelW);
 
 	this->renderer = SDL_CreateRenderer(this->window, NULL);
     if (this->renderer == nullptr) {
@@ -155,7 +156,8 @@ void Sofanthiel::processEvents()
         if(event.type == SDL_EVENT_QUIT) {
             showExitConfirmation = true;
         }
-        else if(event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED) {
+        else if(event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
+                event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
             handleDPIChange();
         }
         else if(event.type == SDL_EVENT_DROP_FILE) {
@@ -282,8 +284,41 @@ void Sofanthiel::update()
     }
 
     if (ImGui::BeginPopupModal("Import Palettes", &showPaletteImportPopup, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Select palettes to import:");
+        int totalParsed = 0;
+        for (const auto& g : parsedPaletteGroups)
+            totalParsed += static_cast<int>(g.palettes.size());
+
+        ImGui::TextWrapped(
+            "Found %zu group(s) containing %d palette(s) in the C file.",
+            parsedPaletteGroups.size(), totalParsed);
+
+        if (!this->palettes.empty()) {
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.4f, 1.0f),
+                "You currently have %zu palette(s) loaded.",
+                this->palettes.size());
+        }
+
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
+
+        int totalSelected = 0;
+        int totalSelectable = 0;
+        for (const auto& sel : paletteImportSelections) {
+            for (auto s : sel) { if (s) totalSelected++; totalSelectable++; }
+        }
+
+        if (ImGui::SmallButton("Select All")) {
+            for (auto& sel : paletteImportSelections)
+                for (auto& s : sel) s = 1;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Deselect All")) {
+            for (auto& sel : paletteImportSelections)
+                for (auto& s : sel) s = 0;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d / %d selected", totalSelected, totalSelectable);
 
         ImGui::BeginChild("PaletteList", ImVec2(0, 300), ImGuiChildFlags_Borders);
 
@@ -294,13 +329,10 @@ void Sofanthiel::update()
             int selectedCount = 0;
             for (auto s : selections) if (s) selectedCount++;
 
-            bool allSelected = (selectedCount == static_cast<int>(selections.size()));
-            bool noneSelected = (selectedCount == 0);
-
             ImGui::PushID(static_cast<int>(gi));
 
             if (ImGui::TreeNodeEx("##group", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap,
-                "%s (%zu palettes)", group.name.c_str(), group.palettes.size())) {
+                "%s (%d / %zu selected)", group.name.c_str(), selectedCount, group.palettes.size())) {
 
                 ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("All  None").x - ImGui::GetStyle().ItemSpacing.x);
                 if (ImGui::SmallButton("All")) {
@@ -357,11 +389,13 @@ void Sofanthiel::update()
 
         ImGui::EndChild();
 
-        int totalSelected = 0;
+        totalSelected = 0;
         for (const auto& sel : paletteImportSelections)
             for (auto s : sel) if (s) totalSelected++;
 
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
 
         bool canImport = totalSelected > 0;
         if (!canImport) ImGui::BeginDisabled();
@@ -380,7 +414,7 @@ void Sofanthiel::update()
             ImGui::CloseCurrentPopup();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Replace existing palettes with selected (%d)", totalSelected);
+            ImGui::SetTooltip("Clear all current palettes and import only the selected ones");
         }
 
         ImGui::SameLine();
@@ -396,7 +430,7 @@ void Sofanthiel::update()
             ImGui::CloseCurrentPopup();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Append selected (%d) to existing palettes", totalSelected);
+            ImGui::SetTooltip("Add selected palettes after your existing ones");
         }
 
         if (!canImport) ImGui::EndDisabled();
@@ -554,7 +588,6 @@ void Sofanthiel::handleMenuBar()
                                 showPaletteImportPopup = true;
                             }
                         }
-                        this->palettes = ResourceManager::loadPalettes(outPath);
                         free(outPath);
                     }
                 }
@@ -639,6 +672,13 @@ void Sofanthiel::handleMenuBar()
                     currentAnimation < static_cast<int>(animations.size()) &&
                     !animations[currentAnimation].entries.empty() &&
                     !animationCels.empty() && tiles.getSize() > 0;
+                if (ImGui::BeginMenu(ICON_FA_SLIDERS " GIF Settings")) {
+                    if (ImGui::MenuItem("Scale x1", nullptr, gifExportScale == 1)) gifExportScale = 1;
+                    if (ImGui::MenuItem("Scale x2", nullptr, gifExportScale == 2)) gifExportScale = 2;
+                    if (ImGui::MenuItem("Scale x3", nullptr, gifExportScale == 3)) gifExportScale = 3;
+                    if (ImGui::MenuItem("Scale x4", nullptr, gifExportScale == 4)) gifExportScale = 4;
+                    ImGui::EndMenu();
+                }
                 if (!canExportGif) ImGui::BeginDisabled();
                 if (ImGui::MenuItem(ICON_FA_FILM " Animation to GIF (.gif)")) {
                     nfdresult_t result = NFD_SaveDialog("gif", nullptr, &outPath);
@@ -657,7 +697,7 @@ void Sofanthiel::handleMenuBar()
                             this->frameRate,
                             static_cast<int>(previewSize.x),
                             static_cast<int>(previewSize.y),
-                            offX, offY, 1);
+                            offX, offY, gifExportScale);
                     }
                 }
                 if (!canExportGif) ImGui::EndDisabled();
@@ -665,7 +705,7 @@ void Sofanthiel::handleMenuBar()
                     if (!canExportGif)
                         ImGui::SetTooltip("Select an animation with cels and tiles loaded first");
                     else
-                        ImGui::SetTooltip("Export current animation as an animated GIF");
+                        ImGui::SetTooltip("Export current animation as an animated GIF (scale x%d)", gifExportScale);
                 }
                 ImGui::EndMenu();
             }
@@ -1333,10 +1373,11 @@ void Sofanthiel::loadProject(const std::string& path)
 }
 
 void Sofanthiel::handleDPIChange() {
-    float newDisplayScale = SDL_GetWindowDisplayScale(this->window);
-    if (newDisplayScale <= 0.0f) {
-        newDisplayScale = 1.0f;
-    }
+    int logicalW = 0, pixelW = 0;
+    SDL_GetWindowSize(this->window, &logicalW, nullptr);
+    SDL_GetWindowSizeInPixels(this->window, &pixelW, nullptr);
+    float newDisplayScale = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
+    if (newDisplayScale < 1.0f) newDisplayScale = 1.0f;
 
     if (newDisplayScale != this->dpiScale) {
         SDL_Log("DPI scale changed from %.2f to %.2f", this->dpiScale, newDisplayScale);

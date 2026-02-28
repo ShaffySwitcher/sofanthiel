@@ -263,6 +263,8 @@ private:
     std::vector<ParsedCPaletteGroup> parsedPaletteGroups;
     std::vector<std::vector<uint8_t>> paletteImportSelections;
 
+    int gifExportScale = 1;
+
     std::string currentProjectPath;
 
     float dpiScale = 1.0f;
