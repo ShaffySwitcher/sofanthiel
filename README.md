@@ -1,6 +1,6 @@
 # sofanthiel
 
-
+[Windows](https://nightly.link/ShaffySwitcher/sofanthiel/workflows/build/main/sofanthiel-windows.zip) | [Linux](https://nightly.link/ShaffySwitcher/sofanthiel/workflows/build/main/sofanthiel-linux.zip)
 
 I have been trying<br>
 To write a README for you<br>
