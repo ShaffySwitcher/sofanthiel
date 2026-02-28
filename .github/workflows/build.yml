@@ -1,0 +1,367 @@
+name: Build Sofanthiel
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake git pkg-config \
+          libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+          libxinerama-dev libxss-dev libxkbcommon-dev \
+          libegl1-mesa-dev libgles2-mesa-dev libdrm-dev \
+          libasound2-dev libpulse-dev \
+          libgtk-3-dev
+
+    - name: Install pkg-config
+      run: |
+        sudo apt-get install -y pkgconf
+
+    - name: Build and Install NFD
+      run: |
+        rm -rf nativefiledialog
+        git clone https://github.com/mlabbe/nativefiledialog --branch devel --depth 1
+        cd nativefiledialog/build/gmake_linux
+        make config=release_x64 -j$(nproc)
+        sudo mkdir -p /usr/local/include /usr/local/lib
+        sudo cp ../../src/include/nfd.h /usr/local/include/
+        sudo cp ../lib/Release/x64/libnfd.a /usr/local/lib/
+        sudo ldconfig
+        cd ../../..
+
+    - name: Build and Install SDL3
+      run: |
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+        rm -rf SDL
+        git clone https://github.com/libsdl-org/SDL.git --branch main --depth 1
+        cd SDL
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DSDL_INSTALL=ON -DSDL_SHARED=ON -DSDL_STATIC=ON
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+        pkg-config --modversion sdl3
+        cd ../..
+
+    - name: Build and Install SDL3_image
+      run: |
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+        rm -rf SDL_image
+        git clone https://github.com/libsdl-org/SDL_image.git --branch main --depth 1
+        cd SDL_image
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DSDL3IMAGE_INSTALL=ON -DSDL3IMAGE_SHARED=ON -DSDL3IMAGE_STATIC=ON \
+          -DCMAKE_PREFIX_PATH=/usr/local
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+        pkg-config --modversion SDL3_image || echo "SDL3_image not found, checking sdl3-image..."
+        pkg-config --modversion sdl3-image || echo "Neither SDL3_image nor sdl3-image found"
+        cd ../..
+
+    - name: Verify pkg-config paths
+      run: |
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+        echo "PKG_CONFIG_PATH is: $PKG_CONFIG_PATH"
+        ls -l /usr/local/lib/pkgconfig/
+        if [ -f /usr/local/lib/pkgconfig/SDL3_image.pc ]; then
+          cat /usr/local/lib/pkgconfig/SDL3_image.pc
+          echo "Using SDL3_image (uppercase)"
+          SDL3_IMAGE_NAME="SDL3_image"
+        elif [ -f /usr/local/lib/pkgconfig/sdl3-image.pc ]; then
+          cat /usr/local/lib/pkgconfig/sdl3-image.pc
+          echo "Using sdl3-image (lowercase)"
+          SDL3_IMAGE_NAME="sdl3-image"
+        else
+          echo "No SDL3 image package config file found!"
+          exit 1
+        fi
+        pkg-config --cflags --libs sdl3 $SDL3_IMAGE_NAME || exit 1
+
+    - name: Build and Install ImGui
+      run: |
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+        rm -rf imgui
+        git clone https://github.com/ocornut/imgui.git --branch docking --depth 1
+        cd imgui
+        
+        # Determine SDL3_image package name
+        if pkg-config --exists SDL3_image; then
+          SDL3_IMAGE_NAME="SDL3_image"
+        else
+          SDL3_IMAGE_NAME="sdl3-image"
+        fi
+        
+        cat > CMakeLists.txt << EOF
+        cmake_minimum_required(VERSION 3.10)
+        project(imgui)
+
+        set(CMAKE_CXX_STANDARD 17)
+
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(SDL3 REQUIRED sdl3)
+        pkg_check_modules(SDL3_IMAGE REQUIRED ${SDL3_IMAGE_NAME})
+        pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+
+        add_library(imgui STATIC
+            imgui.cpp
+            imgui_demo.cpp
+            imgui_draw.cpp
+            imgui_tables.cpp
+            imgui_widgets.cpp
+            backends/imgui_impl_sdl3.cpp
+            backends/imgui_impl_sdlrenderer3.cpp
+        )
+
+        target_include_directories(imgui PUBLIC 
+            \${CMAKE_CURRENT_SOURCE_DIR}
+            \${CMAKE_CURRENT_SOURCE_DIR}/backends
+            \${SDL3_INCLUDE_DIRS}
+            \${SDL3_IMAGE_INCLUDE_DIRS}
+            \${GTK3_INCLUDE_DIRS}
+        )
+
+        target_link_libraries(imgui PRIVATE 
+            \${SDL3_LIBRARIES}
+            \${SDL3_IMAGE_LIBRARIES}
+            \${GTK3_LIBRARIES}
+        )
+
+        install(TARGETS imgui DESTINATION /usr/local/lib)
+        install(FILES imgui.h imgui_internal.h imconfig.h imstb_rectpack.h imstb_textedit.h imstb_truetype.h 
+                DESTINATION /usr/local/include)
+        install(FILES backends/imgui_impl_sdl3.h backends/imgui_impl_sdlrenderer3.h 
+                DESTINATION /usr/local/include)
+        EOF
+        
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+        cd ../..
+
+    - name: Build Sofanthiel
+      run: |
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+        make -j$(nproc)
+        ls -lh bin/sofanthiel
+        ldd bin/sofanthiel || true
+        file bin/sofanthiel
+
+    - name: Prepare Linux artifact
+      run: |
+        mkdir -p sofanthiel-linux-dist
+        cp bin/sofanthiel sofanthiel-linux-dist/
+        cp -r sofanthiel/assets sofanthiel-linux-dist/
+
+    - name: Upload Linux build
+      uses: actions/upload-artifact@v4
+      with:
+        name: sofanthiel-linux
+        path: sofanthiel-linux-dist
+        
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-toolchain
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-gtk3
+          git
+          make
+    
+    - name: Build and Install NFD
+      shell: msys2 {0}
+      run: |
+        rm -rf nativefiledialog
+        git clone https://github.com/mlabbe/nativefiledialog --branch devel --depth 1
+        cd nativefiledialog/build/gmake_windows
+        make config=release_x64 -j$(nproc)
+        
+        # Debug - List files to see what's actually built
+        echo "Checking NFD build output:"
+        ls -la ../lib/Release/x64/
+        
+        # Create target directories
+        mkdir -p /mingw64/include /mingw64/lib
+        
+        # Copy header file
+        cp ../../src/include/nfd.h /mingw64/include/
+        
+        # Try different possible library names
+        if [ -f ../lib/Release/x64/nfd.lib ]; then
+          echo "Found nfd.lib"
+          cp ../lib/Release/x64/nfd.lib /mingw64/lib/libnfd.a
+        elif [ -f ../lib/Release/x64/nfd.a ]; then
+          echo "Found nfd.a"
+          cp ../lib/Release/x64/nfd.a /mingw64/lib/libnfd.a
+        elif [ -f ../lib/Release/x64/libnfd.a ]; then
+          echo "Found libnfd.a"
+          cp ../lib/Release/x64/libnfd.a /mingw64/lib/
+        else
+          echo "NFD library not found! Checking entire directory:"
+          find .. -name "*.a" -o -name "*.lib"
+          exit 1
+        fi
+        
+        cd ../../..
+    
+    - name: Build and Install SDL3
+      shell: msys2 {0}
+      run: |
+        rm -rf SDL
+        git clone https://github.com/libsdl-org/SDL.git --branch main --depth 1
+        cd SDL
+        mkdir build && cd build
+        # Explicitly specify MSYS Makefiles generator
+        cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/mingw64 \
+          -DSDL_INSTALL=ON -DSDL_SHARED=ON -DSDL_STATIC=ON
+        make -j$(nproc)
+        make install
+        # Verify SDL3 installation
+        echo "Checking SDL3 libraries:"
+        find /mingw64/lib -name "*SDL3*"
+        pkg-config --modversion sdl3
+        # Create symlink if library name is different
+        if [ ! -f /mingw64/lib/libSDL3main.a ] && [ -f /mingw64/lib/libSDL3_main.a ]; then
+          ln -s /mingw64/lib/libSDL3_main.a /mingw64/lib/libSDL3main.a
+        fi
+        cd ../..
+    
+    - name: Build and Install SDL3_image
+      shell: msys2 {0}
+      run: |
+        rm -rf SDL_image
+        git clone https://github.com/libsdl-org/SDL_image.git --branch main --depth 1
+        cd SDL_image
+        mkdir build && cd build
+        cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/mingw64 \
+          -DSDL3IMAGE_INSTALL=ON -DSDL3IMAGE_SHARED=ON -DSDL3IMAGE_STATIC=ON \
+          -DCMAKE_PREFIX_PATH=/mingw64
+        make -j$(nproc)
+        make install
+        pkg-config --modversion SDL3_image || echo "SDL3_image not found, checking sdl3-image..."
+        pkg-config --modversion sdl3-image || echo "Neither SDL3_image nor sdl3-image found"
+        cd ../..
+    
+    - name: Verify pkg-config paths
+      shell: msys2 {0}
+      run: |
+        echo "PKG_CONFIG_PATH is: $PKG_CONFIG_PATH"
+        ls -l /mingw64/lib/pkgconfig/
+        if [ -f /mingw64/lib/pkgconfig/SDL3_image.pc ]; then
+          cat /mingw64/lib/pkgconfig/SDL3_image.pc
+          echo "Using SDL3_image (uppercase)"
+          SDL3_IMAGE_NAME="SDL3_image"
+        elif [ -f /mingw64/lib/pkgconfig/sdl3-image.pc ]; then
+          cat /mingw64/lib/pkgconfig/sdl3-image.pc
+          echo "Using sdl3-image (lowercase)"
+          SDL3_IMAGE_NAME="sdl3-image"
+        else
+          echo "No SDL3 image package config file found!"
+          exit 1
+        fi
+        pkg-config --cflags --libs sdl3 $SDL3_IMAGE_NAME || exit 1
+    
+    - name: Build and Install ImGui
+      shell: msys2 {0}
+      run: |
+        rm -rf imgui
+        git clone https://github.com/ocornut/imgui.git --branch docking --depth 1
+        cd imgui
+        
+        echo "Building ImGui directly..."
+        # Compile ImGui sources directly
+        x86_64-w64-mingw32-g++ -c imgui.cpp imgui_demo.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp backends/imgui_impl_sdl3.cpp backends/imgui_impl_sdlrenderer3.cpp -I. -I./backends -I/mingw64/include -I/mingw64/include/SDL3
+        
+        # Create static library
+        ar rcs libimgui.a imgui.o imgui_demo.o imgui_draw.o imgui_tables.o imgui_widgets.o imgui_impl_sdl3.o imgui_impl_sdlrenderer3.o
+        
+        # Install library and headers
+        cp libimgui.a /mingw64/lib/
+        mkdir -p /mingw64/include
+        cp imgui.h imconfig.h imgui_internal.h imstb_rectpack.h imstb_textedit.h imstb_truetype.h /mingw64/include/
+        cp backends/imgui_impl_sdl3.h backends/imgui_impl_sdlrenderer3.h /mingw64/include/
+        cd ..
+
+    - name: Verify Libraries
+      shell: msys2 {0}
+      run: |
+        echo "Checking required libraries before build:"
+        ls -la /mingw64/lib/libSDL3*.a
+        ls -la /mingw64/lib/libimgui.a
+        # If libraries are missing, try to find them with different names
+        if [ ! -f /mingw64/lib/libSDL3main.a ]; then
+          echo "SDL3main not found. Searching for alternatives:"
+          find /mingw64 -name "libSDL3*.a"
+        fi
+        if [ ! -f /mingw64/lib/libimgui.a ]; then
+          echo "ImGui not found. Searching for alternatives:"
+          find /mingw64 -name "*imgui*.a" -o -name "*ImGui*.a"
+          # Try to build ImGui manually if CMake approach failed
+          if [ ! -f /mingw64/lib/libimgui.a ]; then
+            echo "Building ImGui manually..."
+            cd imgui
+            x86_64-w64-mingw32-g++ -c imgui.cpp imgui_demo.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp backends/imgui_impl_sdl3.cpp backends/imgui_impl_sdlrenderer3.cpp -I. -I./backends -I/mingw64/include -I/mingw64/include/SDL3
+            ar rcs libimgui.a imgui.o imgui_demo.o imgui_draw.o imgui_tables.o imgui_widgets.o imgui_impl_sdl3.o imgui_impl_sdlrenderer3.o
+            cp libimgui.a /mingw64/lib/
+            cp imgui.h imconfig.h imgui_internal.h imstb_rectpack.h imstb_textedit.h imstb_truetype.h /mingw64/include/
+            cp backends/imgui_impl_sdl3.h backends/imgui_impl_sdlrenderer3.h /mingw64/include/
+            cd ..
+          fi
+        fi
+    
+    - name: Build Sofanthiel
+      shell: msys2 {0}
+      run: |
+        make -j$(nproc)
+        ls -lh bin/sofanthiel.exe
+
+    - name: Prepare Windows artifact
+      shell: msys2 {0}
+      run: |
+        mkdir -p sofanthiel-windows-dist
+        cp bin/sofanthiel.exe sofanthiel-windows-dist/
+        cp -r sofanthiel/assets sofanthiel-windows-dist/ || true
+        
+        # Copy required DLLs
+        cp /mingw64/bin/libgcc_s_seh-1.dll sofanthiel-windows-dist/
+        cp /mingw64/bin/libstdc++-6.dll sofanthiel-windows-dist/
+        cp /mingw64/bin/SDL3.dll sofanthiel-windows-dist/
+        cp /mingw64/bin/SDL3_image.dll sofanthiel-windows-dist/
+        
+        # Copy any other potential dependencies
+        ldd bin/sofanthiel.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} sofanthiel-windows-dist/ || true
+        
+        echo "Contents of distribution directory:"
+        ls -la sofanthiel-windows-dist/
+
+    - name: Upload Windows build
+      uses: actions/upload-artifact@v4
+      with:
+        name: sofanthiel-windows
+        path: sofanthiel-windows-dist
