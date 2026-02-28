@@ -68,9 +68,10 @@ bool Sofanthiel::init()
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    int windowWidth, windowHeight;
-    SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
-    io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
+    int pixelWidth = 0, pixelHeight = 0;
+    SDL_GetWindowSizeInPixels(this->window, &pixelWidth, &pixelHeight);
+    io.DisplaySize = ImVec2((float)pixelWidth, (float)pixelHeight);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
     this->dpiScale = displayScale;
 
@@ -240,6 +241,13 @@ void Sofanthiel::update()
 {
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
+
+    int pixelWidth = 0, pixelHeight = 0;
+    SDL_GetWindowSizeInPixels(this->window, &pixelWidth, &pixelHeight);
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)pixelWidth, (float)pixelHeight);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
     ImGui::NewFrame();
 
     ImGui::DockSpaceOverViewport(ImGui::GetID("Sofanthiel"), ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -1374,10 +1382,20 @@ void Sofanthiel::loadProject(const std::string& path)
 
 void Sofanthiel::handleDPIChange() {
     int logicalW = 0, pixelW = 0;
+    int logicalH = 0, pixelH = 0;
     SDL_GetWindowSize(this->window, &logicalW, nullptr);
+    SDL_GetWindowSize(this->window, nullptr, &logicalH);
     SDL_GetWindowSizeInPixels(this->window, &pixelW, nullptr);
-    float newDisplayScale = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
+    SDL_GetWindowSizeInPixels(this->window, nullptr, &pixelH);
+
+    float scaleX = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
+    float scaleY = (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 1.0f;
+    float newDisplayScale = (scaleX + scaleY) * 0.5f;
     if (newDisplayScale < 1.0f) newDisplayScale = 1.0f;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)pixelW, (float)pixelH);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
     if (newDisplayScale != this->dpiScale) {
         SDL_Log("DPI scale changed from %.2f to %.2f", this->dpiScale, newDisplayScale);
@@ -1388,7 +1406,6 @@ void Sofanthiel::handleDPIChange() {
         ImGuiStyle& style = ImGui::GetStyle();
         style.ScaleAllSizes(newDisplayScale);
 
-        ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
         
         float baseFontSize = 13.0f * newDisplayScale;
