@@ -11,6 +11,8 @@
 #include "imgui_impl_sdlrenderer3.h"
 #include "imgui_internal.h"
 #include "ResourceManager.h"
+#include "UndoRedo.h"
+#include "InputManager.h"
 
 //-----------------------------------------------------------------------------
 
@@ -58,9 +60,6 @@ public:
     int run();
 
 private:
-    //-----------------------------------------------------------------------------
-    // Core Application Functions
-    //-----------------------------------------------------------------------------
     bool init();
     void close();
     void processEvents();
@@ -68,10 +67,11 @@ private:
     void render();
     void setupDockingLayout();
     void handleDPIChange();
+    void handleDroppedFile(const std::string& path);
+    void saveProject(const std::string& path);
+    void loadProject(const std::string& path);
 
-    //-----------------------------------------------------------------------------
-    // Main UI Panel Handlers
-    //-----------------------------------------------------------------------------
+    // ui handlers (main)
     void handleMenuBar();
     void handleTimeline();
     void handlePreview();
@@ -80,18 +80,14 @@ private:
     void handleAnimCels();
     void handleAnims();
 
-    //-----------------------------------------------------------------------------
-    // Cel Editing UI Handlers
-    //-----------------------------------------------------------------------------
+    // ui handlers (cel editor)
     void handleCelInfobar();
     void handleCelPreview();
     void handleCelOAMs();
     void handleCelEditor();
     void handleCelSpritesheet();
 
-    //-----------------------------------------------------------------------------
-    // Timeline Components
-    //-----------------------------------------------------------------------------
+    // timeline (i'm fucking dying)
     void drawTimelineControls();
     void drawTimelineHeaders(float timelineStartX, float& syncScroll, float frameWidth);
     void drawTimelineContent(Animation& anim, float timelineStartX, float& syncScroll, float frameWidth, float requiredWidth);
@@ -111,9 +107,7 @@ private:
     void handleTimelineDragging(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
         float syncScroll, float frameWidth, TimelineDragState& dragState, float entryHeight);
 
-    //-----------------------------------------------------------------------------
-    // Preview Components
-    //-----------------------------------------------------------------------------
+    // preview
     void drawBackgroundTexture(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize);
     void updateAnimationPlayback();
     void drawCurrentAnimationFrame(ImDrawList* drawList, ImVec2 origin, float zoom);
@@ -122,17 +116,17 @@ private:
     void handleAnimationDragging();
     bool isMouseOverAnimation(const ImVec2& mousePos);
 
-    //-----------------------------------------------------------------------------
-    // Spritesheet Components
-    //-----------------------------------------------------------------------------
+    // spritesheet
     void drawSpritesheetContent(const ImVec2& origin);
     void drawSpritesheetTiles(ImDrawList* drawList, const ImVec2& origin);
     void drawSingleTile(ImDrawList* drawList, float xPos, float yPos, int tileIndex);
     void drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin);
+    void handleSpritesheetSelection(const ImVec2& origin);
+    void drawSpritesheetSelection(ImDrawList* drawList, const ImVec2& origin);
+    void drawSpritesheetImportOverlay(ImDrawList* drawList, const ImVec2& origin);
+    void handleSpritesheetContextMenu(const ImVec2& origin);
 
-    //-----------------------------------------------------------------------------
-    // Palette Components
-    //-----------------------------------------------------------------------------
+    // palette
     void drawPaletteContent(const ImVec2& origin);
     void drawPaletteInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin);
     void drawPaletteColors(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize);
@@ -140,9 +134,7 @@ private:
     void handleColorPicker(int editPaletteIdx, int editColorIdx, float editColor[4]);
 	void initializeDefaultPalettes();
 
-    //-----------------------------------------------------------------------------
-    // OAM Preview Components
-    //-----------------------------------------------------------------------------
+    // oam preview
     void drawCelPreviewInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin);
     void drawCelPreviewContent(const ImVec2& origin);
     void handleOAMDragging(const ImVec2& origin, float offsetX, float offsetY);
@@ -150,9 +142,6 @@ private:
     void drawCelSpritesheetTiles(ImDrawList* drawList, const ImVec2& origin);
     void handleCelSpritesheetClicks(const ImVec2& origin);
 
-    //-----------------------------------------------------------------------------
-    // OAM/Sprite Rendering
-    //-----------------------------------------------------------------------------
     void renderOAM(ImDrawList* drawList, ImVec2 origin, float zoom,
         const TengokuOAM& oam, float offsetX, float offsetY, float alpha);
     void getOAMDimensions(int objShape, int objSize, int& width, int& height);
@@ -160,30 +149,24 @@ private:
         int tileIdx, int tx, int ty, int paletteIndex,
         bool hFlip, bool vFlip, float alpha);
 
-    //-----------------------------------------------------------------------------
-    // Common Utility Functions
-    //-----------------------------------------------------------------------------
     void drawGrid(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float zoom);
     void drawBackground(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float* color);
     ImVec2 calculateContentCenter();
+    void recalculateTotalFrames();
+    bool isCelNameUnique(const std::string& name, int excludeIndex = -1) const;
+    bool isAnimationNameUnique(const std::string& name, int excludeIndex = -1) const;
+    void applyTheme();
     
-    // UI Layout Helpers
     float calculateRightAlignedPosition(const char* text, float padding = 0.0f);
     float calculateRightAlignedPosition(float elementWidth, float padding = 0.0f);
     float getScaledSize(float baseSize);
     ImVec2 getScaledButtonSize(float baseWidth, float baseHeight = 0.0f);
 
-    //-----------------------------------------------------------------------------
-    // Core Application State
-    //-----------------------------------------------------------------------------
     bool isRunning = true;
     bool isDockingLayoutSetup = false;
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
 
-    //-----------------------------------------------------------------------------
-    // UI State
-    //-----------------------------------------------------------------------------
     bool celEditingMode = false;
     ImVec2 backgroundOffset = ImVec2(0, 0);
     int editingCelIndex = -1;
@@ -199,9 +182,6 @@ private:
     bool emphasizeSelectedOAMs = true;
     int gridSize = 8;
 
-    //-----------------------------------------------------------------------------
-    // Animation Data
-    //-----------------------------------------------------------------------------
     std::vector<AnimationCel> animationCels;
     std::vector<Animation> animations;
     std::vector<Palette> palettes;
@@ -210,9 +190,6 @@ private:
     int currentAnimation = -1;
     int currentAnimationCel = -1;
 
-    //-----------------------------------------------------------------------------
-    // Timeline Properties
-    //-----------------------------------------------------------------------------
     int currentFrame = 0;
     int totalFrames = 0;
     bool isPlaying = false;
@@ -220,9 +197,14 @@ private:
     float frameRate = 60.0f;
     float syncScroll = 0.0f;
 
-    //-----------------------------------------------------------------------------
-    // Preview Properties
-    //-----------------------------------------------------------------------------
+    TimelineResizeState timelineResizeState;
+    TimelineDragState timelineDragState;
+    int timelineHoveredEntryIdx = -1;
+    std::vector<int> timelineSelectedEntryIndices;
+
+    int oamDraggedItem = -1;
+    int oamDragHoverItem = -1;
+
     SDL_Texture* backgroundTexture = nullptr;
     bool showBackgroundTexture = false;
     ImVec2 previewSize = ImVec2(GBA_WIDTH, GBA_HEIGHT);
@@ -233,21 +215,28 @@ private:
     ImVec2 previewAnimationStartOffset;
     bool showOverscanArea = false;
 
-    //-----------------------------------------------------------------------------
-    // Spritesheet Properties
-    //-----------------------------------------------------------------------------
     bool usePaletteBGColor = false;
     int currentPalette = 0;
     ViewManager spritesheetView;
 
-    //-----------------------------------------------------------------------------
-    // Palette Properties
-    //-----------------------------------------------------------------------------
-    ViewManager paletteView;
+    bool ssIsSelecting = false;
+    ImVec2 ssSelStart = ImVec2(-1, -1); // tile coords
+    ImVec2 ssSelEnd = ImVec2(-1, -1);   // tile coords
+    bool ssHasSelection = false;
+    int ssSelTileX0 = 0, ssSelTileY0 = 0, ssSelTileX1 = 0, ssSelTileY1 = 0;
 
-    //-----------------------------------------------------------------------------
-    // Clipboard and Dialog State
-    //-----------------------------------------------------------------------------
+    bool ssImportActive = false;
+    std::string ssImportImagePath;
+    SDL_Texture* ssImportPreviewTex = nullptr;
+    int ssImportImageW = 0;
+    int ssImportImageH = 0;
+    ImVec2 ssImportTilePos = ImVec2(0, 0); // tile coords where overlay is placed
+
+    ViewManager paletteView;
+    int editPaletteIdx = 0;
+    int editColorIdx = 0;
+    float editColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
     std::vector<TengokuOAM> oamClipboard;
     std::vector<AnimationEntry> clipboardEntries;
 
@@ -270,5 +259,15 @@ private:
     int renamingAnimationIndex = -1;
     char renameAnimationNameBuffer[128] = "";
 
+    bool showPaletteImportPopup = false;
+    std::vector<ParsedCPaletteGroup> parsedPaletteGroups;
+    std::vector<std::vector<uint8_t>> paletteImportSelections;
+
+    std::string currentProjectPath;
+
     float dpiScale = 1.0f;
+
+    UndoRedoManager undoManager;
+    Palette paletteUndoSnapshot;
+    int paletteUndoSnapshotIndex = -1;
 };

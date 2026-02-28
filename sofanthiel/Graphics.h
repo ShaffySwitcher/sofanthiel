@@ -66,6 +66,8 @@ struct TileData {
 class Tiles {
 public:
 	void addTile(std::array<uint8_t, 32> data);
+	void setTile(int index, const TileData& data);
+	void ensureSize(int count);
 
 	TileData getTile(int index) const;
 

@@ -1,6 +1,6 @@
 #include "Sofanthiel.h"
 
-// i love minimal main functions like that <3
+// welcome to the worse code i've ever written in my life
 int main() {
 	Sofanthiel sofanthiel;
 	return sofanthiel.run();

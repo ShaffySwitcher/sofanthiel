@@ -1,36 +1,15 @@
 ﻿#include "ResourceManager.h"
 #include "gif.h"
 #include <climits>
+#include <cctype>
+#include <cmath>
+#include <regex>
+#include <set>
 
-SDL_Texture* ResourceManager::loadTexture(SDL_Renderer* renderer, std::string path)
-{
-    SDL_Texture* texture = nullptr;
-
-    SDL_Surface* surface = IMG_Load(path.c_str());
-    if (!surface) {
-        SDL_Log("Failed to load image %s! SDL Error: %s\n", path.c_str(), SDL_GetError());
-        return nullptr;
-    }
-
-    texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (!texture) {
-        SDL_Log("Failed to create texture from %s! SDL Error: %s\n", path.c_str(), SDL_GetError());
-    }
-
-    SDL_DestroySurface(surface);
-
-    return texture;
-}
-
-std::vector<AnimationCel> ResourceManager::loadAnimationCels(std::string path)
+namespace {
+std::vector<AnimationCel> parseAnimationCelsStream(std::istream& input, const std::string& sourceLabel)
 {
     std::vector<AnimationCel> cels;
-    std::ifstream file(path);
-
-    if (!file.is_open()) {
-        SDL_Log("Failed to open animation cels file: %s", path.c_str());
-        return cels;
-    }
 
     std::string line;
     AnimationCel currentCel;
@@ -39,7 +18,7 @@ std::vector<AnimationCel> ResourceManager::loadAnimationCels(std::string path)
     int expectedOAMs = 0;
     int currentOAMs = 0;
 
-    while (std::getline(file, line)) {
+    while (std::getline(input, line)) {
         if (line.empty()) {
             continue;
         }
@@ -49,8 +28,8 @@ std::vector<AnimationCel> ResourceManager::loadAnimationCels(std::string path)
                 cels.push_back(currentCel);
             }
 
-            size_t nameStart = line.find("AnimationCel") + 12; // "AnimationCel" length
-            while (nameStart < line.length() && std::isspace(line[nameStart])) nameStart++;
+            size_t nameStart = line.find("AnimationCel") + 12;
+            while (nameStart < line.length() && std::isspace(static_cast<unsigned char>(line[nameStart]))) nameStart++;
 
             size_t nameEnd = line.find("[]", nameStart);
             if (nameEnd != std::string::npos) {
@@ -87,7 +66,7 @@ std::vector<AnimationCel> ResourceManager::loadAnimationCels(std::string path)
             while (iss >> token) {
                 if (token.substr(0, 2) == "0x") {
                     try {
-                        uint16_t value = std::stoul(token, nullptr, 16);
+                        uint16_t value = static_cast<uint16_t>(std::stoul(token, nullptr, 16));
                         values.push_back(value);
                     }
                     catch (...) {
@@ -120,26 +99,19 @@ std::vector<AnimationCel> ResourceManager::loadAnimationCels(std::string path)
         cels.push_back(currentCel);
     }
 
-    file.close();
-    SDL_Log("Loaded %zu animation cels from %s", cels.size(), path.c_str());
+    SDL_Log("Loaded %zu animation cels from %s", cels.size(), sourceLabel.c_str());
     return cels;
 }
 
-std::vector<Animation> ResourceManager::loadAnimations(std::string path)
+std::vector<Animation> parseAnimationsStream(std::istream& input, const std::string& sourceLabel)
 {
     std::vector<Animation> animations;
-    std::ifstream file(path);
-
-    if (!file.is_open()) {
-        SDL_Log("Failed to open animations file: %s", path.c_str());
-        return animations;
-    }
 
     std::string line;
     Animation currentAnimation;
     bool readingAnim = false;
 
-    while (std::getline(file, line)) {
+    while (std::getline(input, line)) {
         if (line.empty() || line.find("#include") != std::string::npos) {
             continue;
         }
@@ -208,18 +180,142 @@ std::vector<Animation> ResourceManager::loadAnimations(std::string path)
         animations.push_back(currentAnimation);
     }
 
-    file.close();
-    SDL_Log("Loaded %zu animations from %s", animations.size(), path.c_str());
+    SDL_Log("Loaded %zu animations from %s", animations.size(), sourceLabel.c_str());
     return animations;
 }
+}
 
-std::vector<Palette> ResourceManager::loadPalettes(std::string path)
+std::vector<ParsedCPaletteGroup> ResourceManager::parsePalettesFromCFile(const std::string& path)
+{
+    std::vector<ParsedCPaletteGroup> groups;
+    std::ifstream file(path);
+
+    if (!file.is_open()) {
+        SDL_Log("Failed to open palette C file: %s", path.c_str());
+        return groups;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+    file.close();
+
+    // i should have learned rust
+    std::regex groupRegex(R"(Palette\s+(\w+)\s*\[\s*\]\s*=\s*\{([\s\S]*?)\};)");
+    std::regex paletteBlockRegex(R"(\{([^{}]*)\})");
+    std::regex colorRegex(R"(TO_RGB555\s*\(\s*0x([0-9A-Fa-f]{4,6})\s*\))");
+
+    auto groupBegin = std::sregex_iterator(content.begin(), content.end(), groupRegex); // looks to the moon
+    auto groupEnd = std::sregex_iterator(); // five pebbles
+
+    for (auto git = groupBegin; git != groupEnd; ++git) {
+        ParsedCPaletteGroup group;
+        group.name = (*git)[1].str();
+        std::string groupBody = (*git)[2].str();
+
+        auto palBegin = std::sregex_iterator(groupBody.begin(), groupBody.end(), paletteBlockRegex);
+        auto palEnd = std::sregex_iterator();
+
+        for (auto pit = palBegin; pit != palEnd; ++pit) {
+            std::string palBody = (*pit)[1].str();
+
+            // extracts the RGB hex value from TO_RGB555
+            auto colBegin = std::sregex_iterator(palBody.begin(), palBody.end(), colorRegex);
+            auto colEnd = std::sregex_iterator();
+
+            Palette palette;
+            memset(&palette, 0, sizeof(Palette));
+            int colorIdx = 0;
+
+            // super parsing style
+            for (auto cit = colBegin; cit != colEnd && colorIdx < 16; ++cit, ++colorIdx) {
+                std::string hexStr = (*cit)[1].str();
+                uint32_t rgb24 = std::stoul(hexStr, nullptr, 16);
+                palette.colors[colorIdx].r = static_cast<uint8_t>((rgb24 >> 16) & 0xFF);
+                palette.colors[colorIdx].g = static_cast<uint8_t>((rgb24 >> 8) & 0xFF);
+                palette.colors[colorIdx].b = static_cast<uint8_t>(rgb24 & 0xFF);
+                palette.colors[colorIdx].a = 255;
+            }
+
+            if (colorIdx > 0) {
+                group.palettes.push_back(palette);
+            }
+        }
+
+        if (!group.palettes.empty()) {
+            groups.push_back(group);
+            SDL_Log("Parsed palette group '%s' with %zu palettes from %s",
+                group.name.c_str(), group.palettes.size(), path.c_str());
+        }
+    }
+
+    SDL_Log("Parsed %zu palette groups from %s", groups.size(), path.c_str());
+    return groups;
+}
+
+SDL_Texture* ResourceManager::loadTexture(SDL_Renderer* renderer, const std::string& path)
+{
+    // ask shaffy why he used a game engine to make a GUI application
+    SDL_Texture* texture = nullptr;
+
+    SDL_Surface* surface = IMG_Load(path.c_str());
+    if (!surface) {
+        SDL_Log("Failed to load image %s! SDL Error: %s\n", path.c_str(), SDL_GetError());
+        return nullptr;
+    }
+
+    texture = SDL_CreateTextureFromSurface(renderer, surface);
+    if (!texture) {
+        SDL_Log("Failed to create texture from %s! SDL Error: %s\n", path.c_str(), SDL_GetError());
+    }
+
+    SDL_DestroySurface(surface);
+
+    return texture;
+}
+
+std::vector<AnimationCel> ResourceManager::loadAnimationCels(const std::string& path)
+{
+    std::ifstream file(path);
+
+    if (!file.is_open()) {
+        SDL_Log("Failed to open animation cels file: %s", path.c_str());
+        return {};
+    }
+
+    return parseAnimationCelsStream(file, path);
+}
+
+std::vector<AnimationCel> ResourceManager::loadAnimationCelsFromText(const std::string& text, const std::string& sourceLabel)
+{
+    std::istringstream input(text);
+    return parseAnimationCelsStream(input, sourceLabel);
+}
+
+std::vector<Animation> ResourceManager::loadAnimations(const std::string& path)
+{
+    std::ifstream file(path);
+
+    if (!file.is_open()) {
+        SDL_Log("Failed to open animations file: %s", path.c_str());
+        return {};
+    }
+
+    return parseAnimationsStream(file, path);
+}
+
+std::vector<Animation> ResourceManager::loadAnimationsFromText(const std::string& text, const std::string& sourceLabel)
+{
+    std::istringstream input(text);
+    return parseAnimationsStream(input, sourceLabel);
+}
+
+std::vector<Palette> ResourceManager::loadPalettes(const std::string& path)
 {
     std::vector<Palette> palettes;
     std::ifstream file(path, std::ios::binary);
 
     if (!file.is_open()) {
-        SDL_Log("Failed to open animations file: %s", path.c_str());
+        SDL_Log("Failed to open palettes file: %s", path.c_str());
         return palettes;
     }
 
@@ -247,7 +343,7 @@ std::vector<Palette> ResourceManager::loadPalettes(std::string path)
     return palettes;
 }
 
-Tiles ResourceManager::loadTiles(std::string path)
+Tiles ResourceManager::loadTiles(const std::string& path)
 {
     Tiles tiles;
     std::ifstream file(path, std::ios::binary);
@@ -257,17 +353,17 @@ Tiles ResourceManager::loadTiles(std::string path)
         return tiles;
 	}
 
-	// Read 32 bytes until end of file
-    while(!file.eof()) {
+    while(true) {
         std::array<uint8_t, 32> data;
         file.read(reinterpret_cast<char*>(data.data()), data.size());
-        // If we read less than 32 bytes, complete with zeros
-        if (file.gcount() < 32) {
-            for (size_t i = file.gcount(); i < 32; i++) {
+        std::streamsize bytesRead = file.gcount();
+        if (bytesRead == 0) break;
+        // complete tile with zero to avoid a super crystaltile2 reference 
+        if (bytesRead < 32) {
+            for (size_t i = static_cast<size_t>(bytesRead); i < 32; i++) {
                 data[i] = 0;
 			}
         }
-        // Add the tile to the collection
 		tiles.addTile(data);
     }
 
@@ -276,11 +372,10 @@ Tiles ResourceManager::loadTiles(std::string path)
 	return tiles;
 }
 
-Tiles ResourceManager::loadTilesFromImageAndPalette(std::string path, std::vector<Palette>& palettes, int currentPalette)
+Tiles ResourceManager::loadTilesFromImageAndPalette(const std::string& path, std::vector<Palette>& palettes, int currentPalette)
 {
     Tiles tiles;
 
-    // Load the image using SDL_image
     SDL_Surface* originalSurface = IMG_Load(path.c_str());
     if (!originalSurface) {
         SDL_Log("Failed to load image %s! SDL_image Error: %s", path.c_str(), SDL_GetError());
@@ -344,6 +439,7 @@ Tiles ResourceManager::loadTilesFromImageAndPalette(std::string path, std::vecto
         }
     }
 
+    // lam*bad*s
     auto findClosestColor = [&](uint8_t r, uint8_t g, uint8_t b) -> int {
         int bestIndex = 0;
         int bestDistance = INT_MAX;
@@ -391,7 +487,6 @@ Tiles ResourceManager::loadTilesFromImageAndPalette(std::string path, std::vecto
             SDL_Color closestColor = allColors[closestIndex];
             quantizedImage[y][x] = closestColor;
 
-            // Calculate error
             float errR = r - closestColor.r;
             float errG = g - closestColor.g;
             float errB = b - closestColor.b;
@@ -475,14 +570,13 @@ Tiles ResourceManager::loadTilesFromImageAndPalette(std::string path, std::vecto
                 int px = (i % 4) * 2;
                 uint8_t pixel1 = tileData.data[py][px] & 0x0F;
                 uint8_t pixel2 = tileData.data[py][px + 1] & 0x0F;
-                tileBytes[i] = (pixel1 << 4) | pixel2;
+                tileBytes[i] = pixel1 | (pixel2 << 4);
             }
 
             tiles.addTile(tileBytes);
         }
     }
 
-    // Cleanup
     SDL_DestroySurface(rgbaSurface);
     if (needCleanup) SDL_DestroySurface(surface);
     SDL_DestroySurface(originalSurface);
@@ -491,7 +585,7 @@ Tiles ResourceManager::loadTilesFromImageAndPalette(std::string path, std::vecto
     return tiles;
 }
 
-void ResourceManager::saveAnimationCels(std::string path, std::vector<AnimationCel>& cels)
+void ResourceManager::saveAnimationCels(const std::string& path, const std::vector<AnimationCel>& cels)
 {
     std::ofstream file;
     file.open(path, std::ios::out | std::ios::trunc);
@@ -528,7 +622,7 @@ void ResourceManager::saveAnimationCels(std::string path, std::vector<AnimationC
     SDL_Log("Saved %zu animation cels to %s", cels.size(), path.c_str());
 }
 
-void ResourceManager::saveAnimations(std::string path, std::vector<Animation>& animations, std::string& cel_filename)
+void ResourceManager::saveAnimations(const std::string& path, const std::vector<Animation>& animations, const std::string& cel_filename)
 {
     std::ofstream file;
     file.open(path, std::ios::out | std::ios::trunc);
@@ -562,7 +656,9 @@ void ResourceManager::saveAnimations(std::string path, std::vector<Animation>& a
     SDL_Log("Saved %zu animations to %s", animations.size(), path.c_str());
 }
 
-void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palettes)
+// i love worms
+// https://worms2d.info/Palette_file
+void ResourceManager::savePalettes(const std::string& path, const std::vector<Palette>& palettes)
 {
     if (path.substr(path.find_last_of(".") + 1) == "pal") {
         std::ofstream file(path, std::ios::binary);
@@ -607,7 +703,6 @@ void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palet
         SDL_Log("Saved %zu palettes to %s", palettes.size(), path.c_str());
     }
     else {
-        // Export C files
         std::ofstream file;
         file.open(path, std::ios::out | std::ios::trunc);
 
@@ -616,12 +711,10 @@ void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palet
             return;
         }
 
-        // Write file header
         file << "// Generated by Sofanthiel [https://github.com/shaffyswitcher/sofanthiel]\n\n";
         file << "#include \"global.h\"\n";
         file << "#include \"graphics.h\"\n\n";
 
-        // Generate palette name from filename
         std::string filename = path.substr(path.find_last_of("/\\") + 1);
         std::string paletteName = filename.substr(0, filename.find_last_of("."));
         if (paletteName.empty()) {
@@ -638,7 +731,6 @@ void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palet
             for (size_t colorIndex = 0; colorIndex < 16; ++colorIndex) {
                 const auto& color = palette.colors[colorIndex];
 
-                // Convert RGB to 24-bit hex value
                 uint32_t rgb24 = (static_cast<uint32_t>(color.r) << 16) |
                     (static_cast<uint32_t>(color.g) << 8) |
                     static_cast<uint32_t>(color.b);
@@ -650,7 +742,7 @@ void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palet
                     file << ",";
                 }
 
-                file << std::dec << "\n"; // Reset to decimal
+                file << std::dec << "\n";
             }
 
             file << "    }";
@@ -667,7 +759,7 @@ void ResourceManager::savePalettes(std::string path, std::vector<Palette>& palet
     }
 }
 
-void ResourceManager::saveTiles(std::string path, Tiles& tiles)
+void ResourceManager::saveTiles(const std::string& path, Tiles& tiles)
 {
     std::ofstream file(path, std::ios::binary);
 
@@ -676,18 +768,16 @@ void ResourceManager::saveTiles(std::string path, Tiles& tiles)
         return;
     }
 
-    // Write each tile as 32 bytes
     for (int i = 0; i < tiles.getSize(); ++i) {
         TileData tileData = tiles.getTile(i);
 
-        // Convert 8x8 4-bit tile data to 32 bytes (4 bits per pixel)
         std::array<uint8_t, 32> tileBytes;
         for (int byteIndex = 0; byteIndex < 32; ++byteIndex) {
             int py = byteIndex / 4;
             int px = (byteIndex % 4) * 2;
             uint8_t pixel1 = tileData.data[py][px] & 0x0F;
             uint8_t pixel2 = tileData.data[py][px + 1] & 0x0F;
-            tileBytes[byteIndex] = (pixel1 << 4) | pixel2;
+            tileBytes[byteIndex] = pixel1 | (pixel2 << 4);
         }
 
         file.write(reinterpret_cast<const char*>(tileBytes.data()), 32);
@@ -697,21 +787,19 @@ void ResourceManager::saveTiles(std::string path, Tiles& tiles)
     SDL_Log("Saved %d tiles to %s", tiles.getSize(), path.c_str());
 }
 
-void ResourceManager::saveTilesToImage(std::string path, Tiles& tiles, std::vector<Palette>& palettes)
+void ResourceManager::saveTilesToImage(const std::string& path, Tiles& tiles, const std::vector<Palette>& palettes)
 {
     if (tiles.getSize() == 0) {
         SDL_Log("No tiles to save to image");
         return;
     }
 
-    // Create a 256x256 surface (32x32 tiles of 8x8 pixels each)
     SDL_Surface* surface = SDL_CreateSurface(256, 256, SDL_PIXELFORMAT_RGBA32);
     if (!surface) {
         SDL_Log("Failed to create surface for tiles image! SDL Error: %s", SDL_GetError());
         return;
     }
 
-    // Create a combined palette from all available palettes for color lookup
     std::vector<SDL_Color> allColors;
     for (const auto& palette : palettes) {
         for (int i = 0; i < 16; ++i) {
@@ -723,45 +811,38 @@ void ResourceManager::saveTilesToImage(std::string path, Tiles& tiles, std::vect
     uint8_t* pixels = static_cast<uint8_t*>(surface->pixels);
     int pitch = surface->pitch;
 
-    // Convert tiles back to image
-    int tilesPerRow = 32; // 256 pixels / 8 pixels per tile = 32 tiles per row
-    int tilesPerCol = 32; // 256 pixels / 8 pixels per tile = 32 tiles per column
+    int tilesPerRow = 256/8;
+    int tilesPerCol = 256/8;
 
     for (int tileIndex = 0; tileIndex < tiles.getSize() && tileIndex < (tilesPerRow * tilesPerCol); ++tileIndex) {
         TileData tileData = tiles.getTile(tileIndex);
 
-        // Calculate tile position in the grid
         int tileX = tileIndex % tilesPerRow;
         int tileY = tileIndex / tilesPerRow;
 
-        // Convert each pixel in the tile
         for (int py = 0; py < 8; ++py) {
             for (int px = 0; px < 8; ++px) {
                 int imageX = tileX * 8 + px;
                 int imageY = tileY * 8 + py;
 
-                // Get palette index from tile data
                 uint8_t paletteIndex = tileData.data[py][px] & 0x0F;
 
-                // Get color from the first palette (or could be made configurable)
-                SDL_Color pixelColor = { 0, 0, 0, 255 }; // Default to black
+                SDL_Color pixelColor = { 0, 0, 0, 255 };
                 if (!palettes.empty() && paletteIndex < 16) {
                     pixelColor = palettes[0].colors[paletteIndex];
                 }
 
-                // Set pixel in surface
                 uint8_t* pixel = pixels + imageY * pitch + imageX * 4;
-                pixel[0] = pixelColor.r; // R
-                pixel[1] = pixelColor.g; // G
-                pixel[2] = pixelColor.b; // B
-                pixel[3] = pixelColor.a; // A
+                pixel[0] = pixelColor.r;
+                pixel[1] = pixelColor.g;
+                pixel[2] = pixelColor.b;
+                pixel[3] = pixelColor.a;
             }
         }
     }
 
     SDL_UnlockSurface(surface);
 
-    // Determine output format from file extension and save
     std::string extension = path.substr(path.find_last_of(".") + 1);
     std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
 
@@ -770,11 +851,9 @@ void ResourceManager::saveTilesToImage(std::string path, Tiles& tiles, std::vect
         success = SDL_SaveBMP(surface, path.c_str());
     }
     else if (extension == "png") {
-        // For PNG, we need to use IMG_SavePNG if available
         success = IMG_SavePNG(surface, path.c_str());
     }
     else {
-        // Default to BMP if unknown extension
         std::string bmpPath = path.substr(0, path.find_last_of(".")) + ".bmp";
         success = SDL_SaveBMP(surface, bmpPath.c_str());
         SDL_Log("Unknown image format, saved as BMP: %s", bmpPath.c_str());
@@ -790,3 +869,470 @@ void ResourceManager::saveTilesToImage(std::string path, Tiles& tiles, std::vect
     SDL_DestroySurface(surface);
 }
 
+bool ResourceManager::exportSelectionToImage(const std::string& path, Tiles& tiles,
+    const std::vector<Palette>& palettes, int paletteIndex,
+    int tileStartX, int tileStartY, int tileCountX, int tileCountY)
+{
+    if (tiles.getSize() == 0 || palettes.empty()) {
+        SDL_Log("No tiles or palettes available for export");
+        return false;
+    }
+
+    int pixelWidth = tileCountX * 8;
+    int pixelHeight = tileCountY * 8;
+
+    SDL_Surface* surface = SDL_CreateSurface(pixelWidth, pixelHeight, SDL_PIXELFORMAT_RGBA32);
+    if (!surface) {
+        SDL_Log("Failed to create surface for selection export! SDL Error: %s", SDL_GetError());
+        return false;
+    }
+
+    int safePalette = SDL_clamp(paletteIndex, 0, static_cast<int>(palettes.size()) - 1);
+
+    SDL_LockSurface(surface);
+    uint8_t* pixels = static_cast<uint8_t*>(surface->pixels);
+    int pitch = surface->pitch;
+
+    for (int ty = 0; ty < tileCountY; ++ty) {
+        for (int tx = 0; tx < tileCountX; ++tx) {
+            int tileIndex = (tileStartY + ty) * TILES_PER_LINE + (tileStartX + tx);
+            if (tileIndex < 0 || tileIndex >= tiles.getSize()) continue;
+
+            TileData tileData = tiles.getTile(tileIndex);
+
+            for (int py = 0; py < 8; ++py) {
+                for (int px = 0; px < 8; ++px) {
+                    int imageX = tx * 8 + px;
+                    int imageY = ty * 8 + py;
+
+                    uint8_t colorIdx = tileData.data[py][px] & 0x0F;
+                    SDL_Color color = palettes[safePalette].colors[colorIdx];
+
+                    uint8_t* pixel = pixels + imageY * pitch + imageX * 4;
+                    pixel[0] = color.r;
+                    pixel[1] = color.g;
+                    pixel[2] = color.b;
+                    pixel[3] = (colorIdx == 0) ? 0 : 255; // Transparent for index 0
+                }
+            }
+        }
+    }
+
+    SDL_UnlockSurface(surface);
+
+    std::string extension = path.substr(path.find_last_of(".") + 1);
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+
+    bool success = false;
+    if (extension == "png") {
+        success = IMG_SavePNG(surface, path.c_str());
+    }
+    else if (extension == "bmp") {
+        success = SDL_SaveBMP(surface, path.c_str());
+    }
+    else {
+        success = IMG_SavePNG(surface, path.c_str());
+    }
+
+    if (!success) {
+        SDL_Log("Failed to export selection to %s! SDL Error: %s", path.c_str(), SDL_GetError());
+    }
+    else {
+        SDL_Log("Exported %dx%d tile selection to %s", tileCountX, tileCountY, path.c_str());
+    }
+
+    SDL_DestroySurface(surface);
+    return success;
+}
+
+bool ResourceManager::importImageAtPosition(const std::string& path, Tiles& tiles,
+    std::vector<Palette>& palettes, int paletteIndex,
+    int tileStartX, int tileStartY)
+{
+    SDL_Surface* originalSurface = IMG_Load(path.c_str());
+    if (!originalSurface) {
+        SDL_Log("Failed to load image %s! SDL Error: %s", path.c_str(), SDL_GetError());
+        return false;
+    }
+
+    SDL_Surface* rgbaSurface = SDL_ConvertSurface(originalSurface, SDL_PIXELFORMAT_RGBA32);
+    if (!rgbaSurface) {
+        SDL_Log("Failed to convert surface! SDL Error: %s", SDL_GetError());
+        SDL_DestroySurface(originalSurface);
+        return false;
+    }
+
+    int imgW = rgbaSurface->w;
+    int imgH = rgbaSurface->h;
+
+    int tileCountX = (imgW + 7) / 8;
+    int tileCountY = (imgH + 7) / 8;
+
+    int safePalette = SDL_clamp(paletteIndex, 0, static_cast<int>(palettes.size()) - 1);
+
+    int maxTileIndex = (tileStartY + tileCountY - 1) * TILES_PER_LINE + (tileStartX + tileCountX - 1);
+    tiles.ensureSize(maxTileIndex + 1);
+
+    SDL_LockSurface(rgbaSurface);
+    uint8_t* pixels = static_cast<uint8_t*>(rgbaSurface->pixels);
+    int pitch = rgbaSurface->pitch;
+
+    const Palette& pal = palettes[safePalette];
+
+    for (int ty = 0; ty < tileCountY; ++ty) {
+        for (int tx = 0; tx < tileCountX; ++tx) {
+            int tileIndex = (tileStartY + ty) * TILES_PER_LINE + (tileStartX + tx);
+
+            TileData tileData;
+            memset(&tileData, 0, sizeof(TileData));
+
+            for (int py = 0; py < 8; ++py) {
+                for (int px = 0; px < 8; ++px) {
+                    int imageX = tx * 8 + px;
+                    int imageY = ty * 8 + py;
+
+                    if (imageX >= imgW || imageY >= imgH) {
+                        tileData.data[py][px] = 0;
+                        continue;
+                    }
+
+                    uint8_t* pixel = pixels + imageY * pitch + imageX * 4;
+                    uint8_t r = pixel[0];
+                    uint8_t g = pixel[1];
+                    uint8_t b = pixel[2];
+                    uint8_t a = pixel[3];
+
+                    if (a < 128) {
+                        tileData.data[py][px] = 0;
+                        continue;
+                    }
+
+                    int bestIdx = 0;
+                    int bestDist = INT_MAX;
+                    for (int ci = 0; ci < 16; ++ci) {
+                        int dr = r - pal.colors[ci].r;
+                        int dg = g - pal.colors[ci].g;
+                        int db = b - pal.colors[ci].b;
+                        int dist = dr * dr + dg * dg + db * db;
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestIdx = ci;
+                        }
+                    }
+                    tileData.data[py][px] = static_cast<uint8_t>(bestIdx);
+                }
+            }
+
+            tiles.setTile(tileIndex, tileData);
+        }
+    }
+
+    SDL_UnlockSurface(rgbaSurface);
+    SDL_DestroySurface(rgbaSurface);
+    SDL_DestroySurface(originalSurface);
+
+    SDL_Log("Imported %dx%d image at tile position (%d, %d)", imgW, imgH, tileStartX, tileStartY);
+    return true;
+}
+
+bool ResourceManager::convertImageToSpritesheetAndPalette(const std::string& path,
+    Tiles& outTiles, std::vector<Palette>& outPalettes)
+{
+    SDL_Surface* originalSurface = IMG_Load(path.c_str());
+    if (!originalSurface) {
+        SDL_Log("Failed to load image %s! SDL Error: %s", path.c_str(), SDL_GetError());
+        return false;
+    }
+
+    SDL_Surface* surface = originalSurface;
+    bool needCleanup = false;
+    if (originalSurface->w != 256 || originalSurface->h != 256) {
+        SDL_Log("Resizing image from %dx%d to 256x256", originalSurface->w, originalSurface->h);
+        surface = SDL_CreateSurface(256, 256, SDL_PIXELFORMAT_RGBA32);
+        if (!surface) {
+            SDL_DestroySurface(originalSurface);
+            return false;
+        }
+        SDL_Rect srcRect = { 0, 0, originalSurface->w, originalSurface->h };
+        SDL_Rect dstRect = { 0, 0, 256, 256 };
+        SDL_BlitSurfaceScaled(originalSurface, &srcRect, surface, &dstRect, SDL_SCALEMODE_NEAREST);
+        needCleanup = true;
+    }
+
+    SDL_Surface* rgbaSurface = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA32);
+    if (!rgbaSurface) {
+        if (needCleanup) SDL_DestroySurface(surface);
+        SDL_DestroySurface(originalSurface);
+        return false;
+    }
+
+    SDL_LockSurface(rgbaSurface);
+    uint8_t* pixels = static_cast<uint8_t*>(rgbaSurface->pixels);
+    int pitch = rgbaSurface->pitch;
+
+    struct ColorEntry { uint8_t r, g, b; };
+    std::unordered_map<uint32_t, int> colorCounts;
+
+    for (int y = 0; y < 256; ++y) {
+        for (int x = 0; x < 256; ++x) {
+            uint8_t* px = pixels + y * pitch + x * 4;
+            uint32_t key = (px[0] << 16) | (px[1] << 8) | px[2];
+            colorCounts[key]++;
+        }
+    }
+
+    std::vector<std::pair<uint32_t, int>> colorList(colorCounts.begin(), colorCounts.end());
+    std::sort(colorList.begin(), colorList.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    Palette extractedPalette;
+    memset(&extractedPalette, 0, sizeof(Palette));
+    extractedPalette.colors[0] = { 0, 0, 0, 0 };
+
+    int numColors = std::min(15, static_cast<int>(colorList.size()));
+
+    if (numColors <= 15) {
+        for (int i = 0; i < numColors; ++i) {
+            uint32_t key = colorList[i].first;
+            extractedPalette.colors[i + 1].r = (key >> 16) & 0xFF;
+            extractedPalette.colors[i + 1].g = (key >> 8) & 0xFF;
+            extractedPalette.colors[i + 1].b = key & 0xFF;
+            extractedPalette.colors[i + 1].a = 255;
+        }
+    }
+
+    outPalettes.clear();
+    outPalettes.push_back(extractedPalette);
+
+    SDL_UnlockSurface(rgbaSurface);
+
+    outTiles = loadTilesFromImageAndPalette(path, outPalettes, 0);
+
+    SDL_DestroySurface(rgbaSurface);
+    if (needCleanup) SDL_DestroySurface(surface);
+    SDL_DestroySurface(originalSurface);
+
+    SDL_Log("Converted image to spritesheet (%d tiles) with extracted %d-color palette",
+        outTiles.getSize(), numColors + 1);
+    return true;
+}
+
+static void getOAMDimensionsStatic(int objShape, int objSize, int& width, int& height)
+{
+    width = 8; height = 8;
+    switch (objShape) {
+    case 0: // SQUARE
+        switch (objSize) {
+        case 0: width = 8; height = 8; break;
+        case 1: width = 16; height = 16; break;
+        case 2: width = 32; height = 32; break;
+        case 3: width = 64; height = 64; break;
+        } break;
+    case 1: // HORIZONTAL
+        switch (objSize) {
+        case 0: width = 16; height = 8; break;
+        case 1: width = 32; height = 8; break;
+        case 2: width = 32; height = 16; break;
+        case 3: width = 64; height = 32; break;
+        } break;
+    case 2: // VERTICAL
+        switch (objSize) {
+        case 0: width = 8; height = 16; break;
+        case 1: width = 8; height = 32; break;
+        case 2: width = 16; height = 32; break;
+        case 3: width = 32; height = 64; break;
+        } break;
+    }
+}
+
+bool ResourceManager::exportAnimationToGif(const std::string& path,
+    const std::vector<Animation>& animations, int animIndex,
+    const std::vector<AnimationCel>& cels,
+    Tiles& tiles, const std::vector<Palette>& palettes,
+    float frameRate, int width, int height,
+    float offsetX, float offsetY, int scale)
+{
+    if (animIndex < 0 || animIndex >= static_cast<int>(animations.size())) {
+        SDL_Log("Invalid animation index %d for GIF export", animIndex);
+        return false;
+    }
+
+    const Animation& anim = animations[animIndex];
+    if (anim.entries.empty()) {
+        SDL_Log("Animation '%s' has no entries", anim.name.c_str());
+        return false;
+    }
+
+    int bboxMinX = width, bboxMinY = height, bboxMaxX = 0, bboxMaxY = 0;
+
+    for (const auto& entry : anim.entries) {
+        if (entry.duration == 0) continue;
+        const AnimationCel* cel = nullptr;
+        for (const auto& c : cels) {
+            if (c.name == entry.celName) { cel = &c; break; }
+        }
+        if (!cel) continue;
+
+        for (const auto& oam : cel->oams) {
+            int oamW = 0, oamH = 0;
+            getOAMDimensionsStatic(oam.objShape, oam.objSize, oamW, oamH);
+
+            int x = static_cast<int>(oam.xPosition + offsetX);
+            int y = static_cast<int>(oam.yPosition + offsetY);
+
+            if (x < bboxMinX) bboxMinX = x;
+            if (y < bboxMinY) bboxMinY = y;
+            if (x + oamW > bboxMaxX) bboxMaxX = x + oamW;
+            if (y + oamH > bboxMaxY) bboxMaxY = y + oamH;
+        }
+    }
+
+    if (bboxMinX < 0) bboxMinX = 0;
+    if (bboxMinY < 0) bboxMinY = 0;
+    if (bboxMaxX > width) bboxMaxX = width;
+    if (bboxMaxY > height) bboxMaxY = height;
+
+    if (bboxMaxX <= bboxMinX || bboxMaxY <= bboxMinY) {
+        SDL_Log("No visible content in animation for GIF export");
+        return false;
+    }
+
+    int cropW = (bboxMaxX - bboxMinX) * scale;
+    int cropH = (bboxMaxY - bboxMinY) * scale;
+
+    std::set<uint32_t> usedColors;
+    for (const auto& entry : anim.entries) {
+        const AnimationCel* cel = nullptr;
+        for (const auto& c : cels) {
+            if (c.name == entry.celName) { cel = &c; break; }
+        }
+        if (!cel) continue;
+        for (const auto& oam : cel->oams) {
+            int palIdx = oam.palette;
+            if (palIdx >= static_cast<int>(palettes.size())) continue;
+            for (int ci = 1; ci < 16; ci++) {
+                const SDL_Color& clr = palettes[palIdx].colors[ci];
+                usedColors.insert((clr.r << 16) | (clr.g << 8) | clr.b);
+            }
+        }
+    }
+
+    int numColors = static_cast<int>(usedColors.size()) + 1; // transparent index
+    int bitDepth = 2;
+    while ((1 << bitDepth) < numColors && bitDepth < 8) bitDepth++;
+
+    const double exportFrameRate = (frameRate > 0.0f) ? static_cast<double>(frameRate) : 60.0;
+
+    uint32_t defaultDelay = static_cast<uint32_t>(std::ceil(100.0 / exportFrameRate));
+    if (defaultDelay < 2) defaultDelay = 2;
+
+    GifWriter writer = {};
+    if (!GifBegin(&writer, path.c_str(), cropW, cropH, defaultDelay, bitDepth)) {
+        SDL_Log("Failed to create GIF file: %s", path.c_str());
+        return false;
+    }
+
+    std::vector<uint8_t> frameBuffer(cropW * cropH * 4, 0);
+
+    int totalFrames = 0;
+    for (const auto& entry : anim.entries)
+        totalFrames += entry.duration;
+
+    double idealTimeCentiseconds = 0.0;
+    double actualTimeCentiseconds = 0.0;
+
+    for (const auto& entry : anim.entries) {
+        if (entry.duration == 0) continue;
+
+        const AnimationCel* cel = nullptr;
+        for (const auto& c : cels) {
+            if (c.name == entry.celName) { cel = &c; break; }
+        }
+
+        memset(frameBuffer.data(), 0, frameBuffer.size());
+
+        if (cel) {
+            for (int i = static_cast<int>(cel->oams.size()) - 1; i >= 0; i--) {
+                const TengokuOAM& oam = cel->oams[i];
+
+                int oamW = 0, oamH = 0;
+                getOAMDimensionsStatic(oam.objShape, oam.objSize, oamW, oamH);
+
+                int paletteIndex = oam.palette;
+                if (paletteIndex >= static_cast<int>(palettes.size()) || palettes.empty()) continue;
+
+                float baseX = oam.xPosition + offsetX;
+                float baseY = oam.yPosition + offsetY;
+
+                for (int ty = 0; ty < oamH / 8; ty++) {
+                    for (int tx = 0; tx < oamW / 8; tx++) {
+                        int tileX = oam.hFlip ? (oamW / 8 - 1 - tx) : tx;
+                        int tileY = oam.vFlip ? (oamH / 8 - 1 - ty) : ty;
+                        int tileIdx = oam.tileID + tileY * 32 + tileX;
+
+                        if (tileIdx >= tiles.getSize()) continue;
+
+                        TileData tile = tiles.getTile(tileIdx);
+
+                        for (int py = 0; py < 8; py++) {
+                            for (int px = 0; px < 8; px++) {
+                                int pixelX = oam.hFlip ? (7 - px) : px;
+                                int pixelY = oam.vFlip ? (7 - py) : py;
+
+                                uint8_t colorIdx = tile.data[pixelY][pixelX];
+                                if (colorIdx == 0) continue;
+
+                                SDL_Color color = palettes[paletteIndex].colors[colorIdx];
+
+                                int imgX = static_cast<int>(baseX + tx * 8 + px) - bboxMinX;
+                                int imgY = static_cast<int>(baseY + ty * 8 + py) - bboxMinY;
+
+                                for (int sy = 0; sy < scale; sy++) {
+                                    for (int sx = 0; sx < scale; sx++) {
+                                        int finalX = imgX * scale + sx;
+                                        int finalY = imgY * scale + sy;
+                                        if (finalX >= 0 && finalX < cropW && finalY >= 0 && finalY < cropH) {
+                                            int idx = (finalY * cropW + finalX) * 4;
+                                            frameBuffer[idx + 0] = color.r;
+                                            frameBuffer[idx + 1] = color.g;
+                                            frameBuffer[idx + 2] = color.b;
+                                            frameBuffer[idx + 3] = 255;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        writer.firstFrame = false;
+
+        GifPalette pal;
+        GifMakePalette(NULL, frameBuffer.data(), cropW, cropH, bitDepth, false, &pal);
+        GifThresholdImage(NULL, frameBuffer.data(), writer.oldImage, cropW, cropH, &pal);
+
+        for (int p = 0; p < cropW * cropH; p++) {
+            if (frameBuffer[p * 4 + 3] == 0) {
+                writer.oldImage[p * 4 + 0] = 0;
+                writer.oldImage[p * 4 + 1] = 0;
+                writer.oldImage[p * 4 + 2] = 0;
+                writer.oldImage[p * 4 + 3] = kGifTransIndex;
+            }
+        }
+
+        idealTimeCentiseconds += (static_cast<double>(entry.duration) / exportFrameRate) * 100.0;
+        double delayDelta = idealTimeCentiseconds - actualTimeCentiseconds;
+        uint32_t entryDelay = static_cast<uint32_t>(std::lround(delayDelta));
+        if (entryDelay < 1) entryDelay = 1;
+        actualTimeCentiseconds += entryDelay;
+
+        GifWriteLzwImage(writer.f, writer.oldImage, 0, 0, cropW, cropH, entryDelay, &pal, 2);
+    }
+
+    GifEnd(&writer);
+    SDL_Log("Exported animation '%s' (%d frames, %dx%d, %d-bit) to GIF: %s",
+        anim.name.c_str(), totalFrames, cropW, cropH, bitDepth, path.c_str());
+    return true;
+}

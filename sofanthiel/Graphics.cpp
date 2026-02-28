@@ -16,9 +16,11 @@ void Tiles::addTile(std::array<uint8_t, 32> data)
 
 TileData Tiles::getTile(int index) const
 {
-	TileData tile;
 	if(index < 0 || index >= this->getSize()) {
-		SDL_Log("Index out of bounds: %d", index);
+		SDL_Log("Tile index out of bounds: %d (size: %d)", index, this->getSize());
+		TileData empty = {};
+		memset(&empty, 0, sizeof(TileData));
+		return empty;
 	}
 	return this->tiles[index];
 }
@@ -36,6 +38,24 @@ int Tiles::getWidth() const
 int Tiles::getHeight() const
 {
 	return ((this->tiles.size() + 31) / 32) * 8;
+}
+
+void Tiles::setTile(int index, const TileData& data)
+{
+	if (index < 0 || index >= static_cast<int>(this->tiles.size())) {
+		SDL_Log("Tile index out of bounds for setTile: %d (size: %d)", index, static_cast<int>(this->tiles.size()));
+		return;
+	}
+	this->tiles[index] = data;
+}
+
+void Tiles::ensureSize(int count)
+{
+	while (static_cast<int>(this->tiles.size()) < count) {
+		TileData empty = {};
+		memset(&empty, 0, sizeof(TileData));
+		this->tiles.push_back(empty);
+	}
 }
 
 void Tiles::clear()
