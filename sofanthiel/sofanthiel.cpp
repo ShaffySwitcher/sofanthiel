@@ -62,16 +62,17 @@ bool Sofanthiel::init()
         SDL_Log("Error creating renderer: %s\n", SDL_GetError());
 		return false;
     }
+    SDL_SetRenderScale(this->renderer, displayScale, displayScale);
 	SDL_SetRenderVSync(this->renderer, true);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    int pixelWidth = 0, pixelHeight = 0;
-    SDL_GetWindowSizeInPixels(this->window, &pixelWidth, &pixelHeight);
-    io.DisplaySize = ImVec2((float)pixelWidth, (float)pixelHeight);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    int windowWidth = 0, windowHeight = 0;
+    SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
+    io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
+    io.DisplayFramebufferScale = ImVec2(displayScale, displayScale);
 
     this->dpiScale = displayScale;
 
@@ -242,11 +243,15 @@ void Sofanthiel::update()
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
 
-    int pixelWidth = 0, pixelHeight = 0;
-    SDL_GetWindowSizeInPixels(this->window, &pixelWidth, &pixelHeight);
+    int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(this->window, &logicalW, &logicalH);
+    SDL_GetWindowSizeInPixels(this->window, &pixelW, &pixelH);
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)pixelWidth, (float)pixelHeight);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
+    io.DisplayFramebufferScale = ImVec2(
+        (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f,
+        (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 1.0f
+    );
 
     ImGui::NewFrame();
 
@@ -1394,8 +1399,9 @@ void Sofanthiel::handleDPIChange() {
     if (newDisplayScale < 1.0f) newDisplayScale = 1.0f;
 
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)pixelW, (float)pixelH);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
+    io.DisplayFramebufferScale = ImVec2(scaleX, scaleY);
+    SDL_SetRenderScale(this->renderer, scaleX, scaleY);
 
     if (newDisplayScale != this->dpiScale) {
         SDL_Log("DPI scale changed from %.2f to %.2f", this->dpiScale, newDisplayScale);
