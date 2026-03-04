@@ -1087,18 +1087,15 @@ bool ResourceManager::convertImageToSpritesheetAndPalette(const std::string& pat
 
     Palette extractedPalette;
     memset(&extractedPalette, 0, sizeof(Palette));
-    extractedPalette.colors[0] = { 0, 0, 0, 0 };
 
-    int numColors = std::min(15, static_cast<int>(colorList.size()));
+    int numColors = std::min(16, static_cast<int>(colorList.size()));
 
-    if (numColors <= 15) {
-        for (int i = 0; i < numColors; ++i) {
-            uint32_t key = colorList[i].first;
-            extractedPalette.colors[i + 1].r = (key >> 16) & 0xFF;
-            extractedPalette.colors[i + 1].g = (key >> 8) & 0xFF;
-            extractedPalette.colors[i + 1].b = key & 0xFF;
-            extractedPalette.colors[i + 1].a = 255;
-        }
+    for (int i = 0; i < numColors; ++i) {
+        uint32_t key = colorList[i].first;
+        extractedPalette.colors[i].r = (key >> 16) & 0xFF;
+        extractedPalette.colors[i].g = (key >> 8) & 0xFF;
+        extractedPalette.colors[i].b = key & 0xFF;
+        extractedPalette.colors[i].a = 255;
     }
 
     outPalettes.clear();

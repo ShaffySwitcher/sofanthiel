@@ -132,6 +132,8 @@ private:
     void drawPaletteColors(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize);
     void drawPaletteGrid(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize);
     void handleColorPicker(int editPaletteIdx, int editColorIdx, float editColor[4]);
+    void handlePaletteRowSelection(const ImVec2& origin);
+    void handlePaletteContextMenu();
 	void initializeDefaultPalettes();
 
     // oam preview
@@ -241,6 +243,10 @@ private:
     int editPaletteIdx = 0;
     int editColorIdx = 0;
     float editColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    int selectedPaletteRow = -1;
+    Palette paletteClipboard;
+    bool hasPaletteClipboard = false;
 
     std::vector<TengokuOAM> oamClipboard;
     std::vector<AnimationEntry> clipboardEntries;

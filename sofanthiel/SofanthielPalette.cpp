@@ -1,5 +1,6 @@
 #include "Sofanthiel.h"
 #include "IconsFontAwesome6.h"
+#include "InputManager.h"
 
 void Sofanthiel::handlePalette()
 {
@@ -35,6 +36,8 @@ void Sofanthiel::handlePalette()
     ImVec2 origin = paletteView.calculateOrigin(contentCenter, baseSize);
 
     drawPaletteContent(origin);
+    handlePaletteRowSelection(origin);
+    handlePaletteContextMenu();
 
     ImGui::EndChild();
     ImGui::Separator();
@@ -232,6 +235,255 @@ void Sofanthiel::drawPaletteGrid(ImDrawList* drawList, ImVec2 origin, ImVec2 sca
             ImVec2(gridOrigin.x + usedWidth, yPos),
             gridColor
         );
+    }
+}
+
+void Sofanthiel::handlePaletteRowSelection(const ImVec2& origin)
+{
+    if (palettes.empty()) return;
+
+    float celSize = 16.0f * paletteView.zoom;
+    float rowHeight = celSize;
+    float rowWidth = celSize * 16;
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        int row = static_cast<int>(floor((mousePos.y - origin.y) / rowHeight));
+        if (row >= 0 && row < static_cast<int>(palettes.size()) &&
+            mousePos.x >= origin.x && mousePos.x < origin.x + rowWidth) {
+            selectedPaletteRow = row;
+        }
+    }
+
+    if (selectedPaletteRow >= 0 && selectedPaletteRow < static_cast<int>(palettes.size())) {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 p0(origin.x, origin.y + selectedPaletteRow * rowHeight);
+        ImVec2 p1(origin.x + rowWidth, origin.y + (selectedPaletteRow + 1) * rowHeight);
+
+        drawList->AddRectFilled(p0, p1, IM_COL32(100, 180, 255, 30));
+        drawList->AddRect(p0, p1, IM_COL32(100, 180, 255, 220), 0, 0, 2.0f);
+    }
+
+    bool canUseShortcuts = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                           selectedPaletteRow >= 0 && selectedPaletteRow < static_cast<int>(palettes.size());
+
+    if (canUseShortcuts) {
+        if (InputManager::isPressed(InputManager::Copy)) {
+            paletteClipboard = palettes[selectedPaletteRow];
+            hasPaletteClipboard = true;
+        }
+
+        if (InputManager::isPressed(InputManager::Paste) && hasPaletteClipboard) {
+            std::vector<Palette> oldPalettes = palettes;
+            palettes[selectedPaletteRow] = paletteClipboard;
+            std::vector<Palette> newPalettes = palettes;
+            int row = selectedPaletteRow;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Paste Palette Row",
+                [this, newPalettes]() { this->palettes = newPalettes; },
+                [this, oldPalettes]() { this->palettes = oldPalettes; }
+            ));
+        }
+
+        if (InputManager::isPressed(InputManager::Delete)) {
+            if (palettes.size() > 1) {
+                std::vector<Palette> oldPalettes = palettes;
+                int oldSelectedRow = selectedPaletteRow;
+                int oldCurrentPalette = currentPalette;
+
+                palettes.erase(palettes.begin() + selectedPaletteRow);
+                currentPalette = SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
+                if (selectedPaletteRow >= static_cast<int>(palettes.size())) {
+                    selectedPaletteRow = static_cast<int>(palettes.size()) - 1;
+                }
+
+                std::vector<Palette> newPalettes = palettes;
+                int newCurrentPalette = currentPalette;
+                int newSelectedRow = selectedPaletteRow;
+
+                undoManager.execute(std::make_unique<LambdaAction>(
+                    "Delete Palette Row",
+                    [this, newPalettes, newCurrentPalette, newSelectedRow]() {
+                        this->palettes = newPalettes;
+                        this->currentPalette = newCurrentPalette;
+                        this->selectedPaletteRow = newSelectedRow;
+                    },
+                    [this, oldPalettes, oldCurrentPalette, oldSelectedRow]() {
+                        this->palettes = oldPalettes;
+                        this->currentPalette = oldCurrentPalette;
+                        this->selectedPaletteRow = oldSelectedRow;
+                    }
+                ));
+            }
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            selectedPaletteRow = -1;
+        }
+    }
+}
+
+void Sofanthiel::handlePaletteContextMenu()
+{
+    static ImVec2 rightClickStart;
+    static bool rightClickTracking = false;
+
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        rightClickStart = ImGui::GetIO().MousePos;
+        rightClickTracking = true;
+    }
+
+    if (rightClickTracking && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        ImVec2 delta(
+            ImGui::GetIO().MousePos.x - rightClickStart.x,
+            ImGui::GetIO().MousePos.y - rightClickStart.y
+        );
+        float dragDist = sqrtf(delta.x * delta.x + delta.y * delta.y);
+        rightClickTracking = false;
+
+        if (dragDist < 5.0f) {
+            ImGui::OpenPopup("PaletteContextMenu");
+        }
+    }
+
+    if (ImGui::BeginPopup("PaletteContextMenu")) {
+        bool hasRow = selectedPaletteRow >= 0 && selectedPaletteRow < static_cast<int>(palettes.size());
+        bool canAdd = palettes.size() < 16;
+
+        if (ImGui::MenuItem(ICON_FA_COPY " Copy", InputManager::Copy.label.c_str(), false, hasRow)) {
+            paletteClipboard = palettes[selectedPaletteRow];
+            hasPaletteClipboard = true;
+        }
+
+        if (ImGui::MenuItem(ICON_FA_PASTE " Paste", InputManager::Paste.label.c_str(), false, hasRow && hasPaletteClipboard)) {
+            std::vector<Palette> oldPalettes = palettes;
+            palettes[selectedPaletteRow] = paletteClipboard;
+            std::vector<Palette> newPalettes = palettes;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Paste Palette Row",
+                [this, newPalettes]() { this->palettes = newPalettes; },
+                [this, oldPalettes]() { this->palettes = oldPalettes; }
+            ));
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem(ICON_FA_CLONE " Duplicate", nullptr, false, hasRow && canAdd)) {
+            std::vector<Palette> oldPalettes = palettes;
+            int oldCurrentPalette = currentPalette;
+            int oldSelectedRow = selectedPaletteRow;
+
+            Palette dup = palettes[selectedPaletteRow];
+            palettes.insert(palettes.begin() + selectedPaletteRow + 1, dup);
+            selectedPaletteRow = selectedPaletteRow + 1;
+
+            std::vector<Palette> newPalettes = palettes;
+            int newSelectedRow = selectedPaletteRow;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Duplicate Palette Row",
+                [this, newPalettes, newSelectedRow]() {
+                    this->palettes = newPalettes;
+                    this->selectedPaletteRow = newSelectedRow;
+                },
+                [this, oldPalettes, oldCurrentPalette, oldSelectedRow]() {
+                    this->palettes = oldPalettes;
+                    this->currentPalette = oldCurrentPalette;
+                    this->selectedPaletteRow = oldSelectedRow;
+                }
+            ));
+        }
+
+        bool canMoveUp = hasRow && selectedPaletteRow > 0;
+        bool canMoveDown = hasRow && selectedPaletteRow < static_cast<int>(palettes.size()) - 1;
+
+        if (ImGui::MenuItem(ICON_FA_ARROW_UP " Move Up", nullptr, false, canMoveUp)) {
+            std::vector<Palette> oldPalettes = palettes;
+            int oldSelectedRow = selectedPaletteRow;
+
+            std::swap(palettes[selectedPaletteRow], palettes[selectedPaletteRow - 1]);
+            selectedPaletteRow--;
+
+            std::vector<Palette> newPalettes = palettes;
+            int newSelectedRow = selectedPaletteRow;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Move Palette Up",
+                [this, newPalettes, newSelectedRow]() {
+                    this->palettes = newPalettes;
+                    this->selectedPaletteRow = newSelectedRow;
+                },
+                [this, oldPalettes, oldSelectedRow]() {
+                    this->palettes = oldPalettes;
+                    this->selectedPaletteRow = oldSelectedRow;
+                }
+            ));
+        }
+
+        if (ImGui::MenuItem(ICON_FA_ARROW_DOWN " Move Down", nullptr, false, canMoveDown)) {
+            std::vector<Palette> oldPalettes = palettes;
+            int oldSelectedRow = selectedPaletteRow;
+
+            std::swap(palettes[selectedPaletteRow], palettes[selectedPaletteRow + 1]);
+            selectedPaletteRow++;
+
+            std::vector<Palette> newPalettes = palettes;
+            int newSelectedRow = selectedPaletteRow;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Move Palette Down",
+                [this, newPalettes, newSelectedRow]() {
+                    this->palettes = newPalettes;
+                    this->selectedPaletteRow = newSelectedRow;
+                },
+                [this, oldPalettes, oldSelectedRow]() {
+                    this->palettes = oldPalettes;
+                    this->selectedPaletteRow = oldSelectedRow;
+                }
+            ));
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem(ICON_FA_ERASER " Delete", InputManager::Delete.label.c_str(), false, hasRow && palettes.size() > 1)) {
+            std::vector<Palette> oldPalettes = palettes;
+            int oldSelectedRow = selectedPaletteRow;
+            int oldCurrentPalette = currentPalette;
+
+            palettes.erase(palettes.begin() + selectedPaletteRow);
+            currentPalette = SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
+            if (selectedPaletteRow >= static_cast<int>(palettes.size())) {
+                selectedPaletteRow = static_cast<int>(palettes.size()) - 1;
+            }
+
+            std::vector<Palette> newPalettes = palettes;
+            int newCurrentPalette = currentPalette;
+            int newSelectedRow = selectedPaletteRow;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Delete Palette Row",
+                [this, newPalettes, newCurrentPalette, newSelectedRow]() {
+                    this->palettes = newPalettes;
+                    this->currentPalette = newCurrentPalette;
+                    this->selectedPaletteRow = newSelectedRow;
+                },
+                [this, oldPalettes, oldCurrentPalette, oldSelectedRow]() {
+                    this->palettes = oldPalettes;
+                    this->currentPalette = oldCurrentPalette;
+                    this->selectedPaletteRow = oldSelectedRow;
+                }
+            ));
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem(ICON_FA_XMARK " Clear Selection", "Esc", false, hasRow)) {
+            selectedPaletteRow = -1;
+        }
+
+        ImGui::EndPopup();
     }
 }
 
