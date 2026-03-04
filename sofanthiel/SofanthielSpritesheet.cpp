@@ -5,6 +5,12 @@
 void Sofanthiel::handleSpritesheet()
 {
     ImGui::Begin("Spritesheet", nullptr, ImGuiWindowFlags_NoCollapse);
+    bool spritesheetWindowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !spritesheetWindowHovered) {
+        ssIsSelecting = false;
+        ssHasSelection = false;
+    }
 
     float infoBarHeight = ImGui::GetFrameHeightWithSpacing() * 3 + ImGui::GetStyle().ItemSpacing.y * 2;
     float contentHeight = ImMax(ImGui::GetContentRegionAvail().y - infoBarHeight, 50.0f);
@@ -236,11 +242,6 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
 
     bool clickedLeft = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     bool hoveredWindow = ImGui::IsWindowHovered();
-
-    if (!hoveredWindow && clickedLeft) {
-        ssIsSelecting = false;
-        ssHasSelection = false;
-    }
 
     if (hoveredWindow && clickedLeft && !ImGui::GetIO().KeyCtrl) {
         int tileX = static_cast<int>(floor((mousePos.x - origin.x) / tileSize));
