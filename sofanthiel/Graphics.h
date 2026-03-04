@@ -68,6 +68,7 @@ public:
 	void addTile(std::array<uint8_t, 32> data);
 	void setTile(int index, const TileData& data);
 	void ensureSize(int count);
+	void resize(int count);
 
 	TileData getTile(int index) const;
 

@@ -153,6 +153,7 @@ private:
     void drawBackground(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float* color);
     ImVec2 calculateContentCenter();
     void recalculateTotalFrames();
+    bool buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<AnimationCel>& outAnimationCels);
     bool isCelNameUnique(const std::string& name, int excludeIndex = -1) const;
     bool isAnimationNameUnique(const std::string& name, int excludeIndex = -1) const;
     void applyTheme();
@@ -231,6 +232,10 @@ private:
     int ssImportImageW = 0;
     int ssImportImageH = 0;
     ImVec2 ssImportTilePos = ImVec2(0, 0); // tile coords where overlay is placed
+
+    std::vector<TileData> ssTileClipboard;
+    int ssTileClipboardWidth = 0;
+    int ssTileClipboardHeight = 0;
 
     ViewManager paletteView;
     int editPaletteIdx = 0;

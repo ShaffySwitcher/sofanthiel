@@ -2,6 +2,8 @@
 #include "IconsFontAwesome6.h"
 #include "InputManager.h"
 #include "UndoRedo.h"
+#include <unordered_map>
+#include <unordered_set>
 
 Sofanthiel::Sofanthiel()
 {
@@ -772,6 +774,67 @@ void Sofanthiel::handleMenuBar()
             }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Tools")) {
+            bool canOptimizeSpritesheet = tiles.getSize() > 0 && !animationCels.empty() && !animations.empty();
+
+            std::unordered_set<std::string> referencedCelNames;
+            for (const auto& animation : animations) {
+                for (const auto& entry : animation.entries) {
+                    if (!entry.celName.empty()) {
+                        referencedCelNames.insert(entry.celName);
+                    }
+                }
+            }
+            int unusedCelCount = 0;
+            for (const auto& cel : animationCels) {
+                if (referencedCelNames.find(cel.name) == referencedCelNames.end()) {
+                    unusedCelCount++;
+                }
+            }
+
+            if (ImGui::MenuItem("Optimize Spritesheet", nullptr, false, canOptimizeSpritesheet)) {
+                Tiles optimizedTiles;
+                std::vector<AnimationCel> optimizedAnimationCels;
+
+                if (buildOptimizedSpritesheetState(optimizedTiles, optimizedAnimationCels)) {
+                    Tiles oldTiles = this->tiles;
+                    std::vector<AnimationCel> oldAnimationCels = this->animationCels;
+                    bool oldCelEditingMode = this->celEditingMode;
+                    int oldEditingCelIndex = this->editingCelIndex;
+                    std::vector<int> oldSelectedOAMIndices = this->selectedOAMIndices;
+
+                    undoManager.execute(std::make_unique<LambdaAction>(
+                        "Optimize Spritesheet",
+                        [this, optimizedTiles, optimizedAnimationCels]() {
+                            this->tiles = optimizedTiles;
+                            this->animationCels = optimizedAnimationCels;
+
+                            if (this->editingCelIndex < 0 || this->editingCelIndex >= static_cast<int>(this->animationCels.size())) {
+                                this->celEditingMode = false;
+                                this->editingCelIndex = -1;
+                                this->selectedOAMIndices.clear();
+                            }
+                        },
+                        [this, oldTiles, oldAnimationCels, oldCelEditingMode, oldEditingCelIndex, oldSelectedOAMIndices]() {
+                            this->tiles = oldTiles;
+                            this->animationCels = oldAnimationCels;
+                            this->celEditingMode = oldCelEditingMode;
+                            this->editingCelIndex = oldEditingCelIndex;
+                            this->selectedOAMIndices = oldSelectedOAMIndices;
+                        }
+                    ));
+                }
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                if (!canOptimizeSpritesheet) {
+                    ImGui::SetTooltip("Load tiles, cels, and animations first.");
+                }
+                else {
+                    ImGui::SetTooltip("Rebuilds spritesheet to only include used tiles.");
+                }
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("View")) {
             if (ImGui::MenuItem(ICON_FA_ROTATE " Reset Layout")) {
                 isDockingLayoutSetup = false;
@@ -859,6 +922,187 @@ void Sofanthiel::handleMenuBar()
             }
         }
     }
+}
+
+bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<AnimationCel>& outAnimationCels)
+{
+    outTiles = this->tiles;
+    outAnimationCels = this->animationCels;
+
+    const int originalTileCount = this->tiles.getSize();
+    if (originalTileCount <= 0 || this->animationCels.empty() || this->animations.empty()) {
+        return false;
+    }
+
+    std::unordered_set<std::string> referencedCelNames;
+    for (const auto& animation : this->animations) {
+        for (const auto& entry : animation.entries) {
+            if (!entry.celName.empty()) {
+                referencedCelNames.insert(entry.celName);
+            }
+        }
+    }
+
+    if (referencedCelNames.empty()) {
+        return false;
+    }
+
+    std::vector<AnimationCel> usedAnimationCels;
+    usedAnimationCels.reserve(this->animationCels.size());
+    for (const auto& cel : this->animationCels) {
+        if (referencedCelNames.find(cel.name) != referencedCelNames.end()) {
+            usedAnimationCels.push_back(cel);
+        }
+    }
+
+    if (usedAnimationCels.empty()) {
+        return false;
+    }
+
+    std::vector<std::vector<int>> packedTileIndices;
+    std::vector<TileData> uniqueTiles;
+    std::unordered_map<std::string, int> tileKeyToUniqueIndex;
+
+    auto makeTileKey = [](const TileData& tile) {
+        std::string key;
+        key.reserve(128);
+        for (int py = 0; py < 8; ++py) {
+            for (int px = 0; px < 8; ++px) {
+                key.push_back(static_cast<char>(tile.data[py][px]));
+            }
+        }
+        return key;
+    };
+
+    auto getUniqueTileIndex = [&makeTileKey, &uniqueTiles, &tileKeyToUniqueIndex](const TileData& tile) {
+        std::string key = makeTileKey(tile);
+        auto found = tileKeyToUniqueIndex.find(key);
+        if (found != tileKeyToUniqueIndex.end()) {
+            return found->second;
+        }
+
+        int newIndex = static_cast<int>(uniqueTiles.size());
+        uniqueTiles.push_back(tile);
+        tileKeyToUniqueIndex.emplace(std::move(key), newIndex);
+        return newIndex;
+    };
+
+    auto ensureRows = [&packedTileIndices](int rowCount) {
+        while (static_cast<int>(packedTileIndices.size()) < rowCount) {
+            packedTileIndices.push_back(std::vector<int>(TILES_PER_LINE, -1));
+        }
+    };
+
+    auto canPlaceBlockWithOverlap = [&packedTileIndices, &ensureRows](int row, int col, int widthTiles, int heightTiles, const std::vector<int>& desiredTileIndices) {
+        if (col < 0 || widthTiles <= 0 || col + widthTiles > TILES_PER_LINE || heightTiles <= 0) {
+            return false;
+        }
+
+        ensureRows(row + heightTiles);
+        for (int ty = 0; ty < heightTiles; ++ty) {
+            for (int tx = 0; tx < widthTiles; ++tx) {
+                int desiredIndex = desiredTileIndices[static_cast<size_t>(ty * widthTiles + tx)];
+                int existingIndex = packedTileIndices[static_cast<size_t>(row + ty)][static_cast<size_t>(col + tx)];
+                if (existingIndex >= 0 && existingIndex != desiredIndex) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    auto placeBlock = [&packedTileIndices](int row, int col, int widthTiles, int heightTiles, const std::vector<int>& desiredTileIndices) {
+        for (int ty = 0; ty < heightTiles; ++ty) {
+            for (int tx = 0; tx < widthTiles; ++tx) {
+                packedTileIndices[static_cast<size_t>(row + ty)][static_cast<size_t>(col + tx)] =
+                    desiredTileIndices[static_cast<size_t>(ty * widthTiles + tx)];
+            }
+        }
+    };
+
+    for (auto& cel : usedAnimationCels) {
+        for (auto& oam : cel.oams) {
+            int width = 0;
+            int height = 0;
+            getOAMDimensions(oam.objShape, oam.objSize, width, height);
+
+            int widthTiles = width / 8;
+            int heightTiles = height / 8;
+            if (widthTiles <= 0 || heightTiles <= 0) {
+                continue;
+            }
+
+            const int oldTileID = static_cast<int>(oam.tileID);
+            std::vector<int> desiredTileIndices(static_cast<size_t>(widthTiles * heightTiles), -1);
+            for (int ty = 0; ty < heightTiles; ++ty) {
+                for (int tx = 0; tx < widthTiles; ++tx) {
+                    int srcTileIndex = oldTileID + ty * TILES_PER_LINE + tx;
+                    TileData tileData = {};
+                    if (srcTileIndex >= 0 && srcTileIndex < originalTileCount) {
+                        tileData = this->tiles.getTile(srcTileIndex);
+                    }
+                    desiredTileIndices[static_cast<size_t>(ty * widthTiles + tx)] = getUniqueTileIndex(tileData);
+                }
+            }
+
+            int placedRow = -1;
+            int placedCol = -1;
+            for (int row = 0; placedRow < 0; ++row) {
+                for (int col = 0; col <= TILES_PER_LINE - widthTiles; ++col) {
+                    if (canPlaceBlockWithOverlap(row, col, widthTiles, heightTiles, desiredTileIndices)) {
+                        placedRow = row;
+                        placedCol = col;
+                        break;
+                    }
+                }
+            }
+
+            placeBlock(placedRow, placedCol, widthTiles, heightTiles, desiredTileIndices);
+
+            int newTileID = placedRow * TILES_PER_LINE + placedCol;
+            oam.tileID = static_cast<uint16_t>(newTileID);
+        }
+    }
+
+    int usedRowCount = static_cast<int>(packedTileIndices.size());
+    while (usedRowCount > 0) {
+        bool rowHasUsedTile = false;
+        const auto& row = packedTileIndices[static_cast<size_t>(usedRowCount - 1)];
+        for (int col = 0; col < TILES_PER_LINE; ++col) {
+            if (row[static_cast<size_t>(col)] >= 0) {
+                rowHasUsedTile = true;
+                break;
+            }
+        }
+        if (rowHasUsedTile) {
+            break;
+        }
+        usedRowCount--;
+    }
+
+    Tiles rebuiltTiles;
+    if (usedRowCount > 0) {
+        rebuiltTiles.ensureSize(usedRowCount * TILES_PER_LINE);
+        TileData emptyTile = {};
+
+        for (int row = 0; row < usedRowCount; ++row) {
+            for (int col = 0; col < TILES_PER_LINE; ++col) {
+                int dstTileIndex = row * TILES_PER_LINE + col;
+                int uniqueTileIndex = packedTileIndices[static_cast<size_t>(row)][static_cast<size_t>(col)];
+
+                if (uniqueTileIndex >= 0 && uniqueTileIndex < static_cast<int>(uniqueTiles.size())) {
+                    rebuiltTiles.setTile(dstTileIndex, uniqueTiles[static_cast<size_t>(uniqueTileIndex)]);
+                }
+                else {
+                    rebuiltTiles.setTile(dstTileIndex, emptyTile);
+                }
+            }
+        }
+    }
+
+    outTiles = rebuiltTiles;
+    outAnimationCels = usedAnimationCels;
+    return true;
 }
 
 void Sofanthiel::drawGrid(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float zoom) {

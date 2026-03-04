@@ -58,6 +58,14 @@ void Tiles::ensureSize(int count)
 	}
 }
 
+void Tiles::resize(int count)
+{
+	if (count < 0) {
+		count = 0;
+	}
+	this->tiles.resize(static_cast<size_t>(count));
+}
+
 void Tiles::clear()
 {
 	this->tiles.clear();

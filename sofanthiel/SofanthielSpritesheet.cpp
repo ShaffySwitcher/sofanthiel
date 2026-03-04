@@ -1,11 +1,12 @@
 #include "Sofanthiel.h"
 #include "IconsFontAwesome6.h"
+#include "InputManager.h"
 
 void Sofanthiel::handleSpritesheet()
 {
     ImGui::Begin("Spritesheet", nullptr, ImGuiWindowFlags_NoCollapse);
 
-    float infoBarHeight = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetStyle().ItemSpacing.y;
+    float infoBarHeight = ImGui::GetFrameHeightWithSpacing() * 3 + ImGui::GetStyle().ItemSpacing.y * 2;
     float contentHeight = ImMax(ImGui::GetContentRegionAvail().y - infoBarHeight, 50.0f);
 
     ImGui::BeginChild("SpritesheetContent", ImVec2(0, contentHeight), ImGuiChildFlags_None);
@@ -30,7 +31,7 @@ void Sofanthiel::handleSpritesheet()
     ImGui::EndChild();
     ImGui::Separator();
 
-    ImGui::BeginChild("SpritesheetInfo", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("SpritesheetInfo", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_None);
 
     ImVec2 mousePosInWindow = ImVec2(
         ImGui::GetIO().MousePos.x - origin.x,
@@ -147,6 +148,48 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
         view.resetView();
     }
 
+    ImGui::Spacing();
+    ImGui::Text("Rows: %d", (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE);
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_PLUS " Row")) {
+        Tiles oldTiles = tiles;
+        int oldSize = tiles.getSize();
+        tiles.ensureSize(oldSize + TILES_PER_LINE);
+        Tiles newTiles = tiles;
+
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Add Spritesheet Row",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
+    }
+
+    ImGui::SameLine();
+    bool canRemoveRow = tiles.getSize() > 0;
+    if (!canRemoveRow) ImGui::BeginDisabled();
+    if (ImGui::Button(ICON_FA_MINUS " Row")) {
+        Tiles oldTiles = tiles;
+        int oldSize = tiles.getSize();
+        int newSize = SDL_max(0, oldSize - TILES_PER_LINE);
+        tiles.resize(newSize);
+        Tiles newTiles = tiles;
+
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Remove Spritesheet Row",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
+    }
+    if (!canRemoveRow) ImGui::EndDisabled();
+
     ImGui::Text("Cursor: (%.0f, %.0f)  Offset: (%.0f, %.0f)",
         SDL_clamp(floor(mousePosInWindow.x / view.zoom), 0, contentSize.x),
         SDL_clamp(floor(mousePosInWindow.y / view.zoom), 0, contentSize.y),
@@ -191,7 +234,15 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
         return;
     }
 
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyCtrl) {
+    bool clickedLeft = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    bool hoveredWindow = ImGui::IsWindowHovered();
+
+    if (!hoveredWindow && clickedLeft) {
+        ssIsSelecting = false;
+        ssHasSelection = false;
+    }
+
+    if (hoveredWindow && clickedLeft && !ImGui::GetIO().KeyCtrl) {
         int tileX = static_cast<int>(floor((mousePos.x - origin.x) / tileSize));
         int tileY = static_cast<int>(floor((mousePos.y - origin.y) / tileSize));
 
@@ -200,6 +251,10 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
             ssIsSelecting = true;
             ssSelStart = ImVec2(static_cast<float>(tileX), static_cast<float>(tileY));
             ssSelEnd = ssSelStart;
+            ssHasSelection = false;
+        }
+        else {
+            ssIsSelecting = false;
             ssHasSelection = false;
         }
     }
@@ -227,6 +282,105 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
 
     if (ssHasSelection && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         ssHasSelection = false;
+    }
+
+    bool canUseShortcuts = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ssHasSelection && !ssImportActive;
+    if (!canUseShortcuts) {
+        return;
+    }
+
+    if (InputManager::isPressed(InputManager::Delete)) {
+        Tiles oldTiles = tiles;
+
+        TileData emptyTile = {};
+        for (int y = ssSelTileY0; y <= ssSelTileY1; ++y) {
+            for (int x = ssSelTileX0; x <= ssSelTileX1; ++x) {
+                int tileIndex = y * TILES_PER_LINE + x;
+                if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
+                    tiles.setTile(tileIndex, emptyTile);
+                }
+            }
+        }
+
+        Tiles newTiles = tiles;
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Clear Tile Selection",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
+    }
+
+    if (InputManager::isPressed(InputManager::Copy)) {
+        int copyWidth = ssSelTileX1 - ssSelTileX0 + 1;
+        int copyHeight = ssSelTileY1 - ssSelTileY0 + 1;
+
+        ssTileClipboard.clear();
+        ssTileClipboard.reserve(static_cast<size_t>(copyWidth * copyHeight));
+
+        TileData emptyTile = {};
+        for (int y = 0; y < copyHeight; ++y) {
+            for (int x = 0; x < copyWidth; ++x) {
+                int srcX = ssSelTileX0 + x;
+                int srcY = ssSelTileY0 + y;
+                int tileIndex = srcY * TILES_PER_LINE + srcX;
+
+                if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
+                    ssTileClipboard.push_back(tiles.getTile(tileIndex));
+                }
+                else {
+                    ssTileClipboard.push_back(emptyTile);
+                }
+            }
+        }
+
+        ssTileClipboardWidth = copyWidth;
+        ssTileClipboardHeight = copyHeight;
+    }
+
+    if (InputManager::isPressed(InputManager::Paste) && !ssTileClipboard.empty() && ssTileClipboardWidth > 0 && ssTileClipboardHeight > 0) {
+        Tiles oldTiles = tiles;
+
+        int destX = ssSelTileX0;
+        int destY = ssSelTileY0;
+
+        int maxDestX = SDL_min(TILES_PER_LINE - 1, destX + ssTileClipboardWidth - 1);
+        int maxDestY = destY + ssTileClipboardHeight - 1;
+        int requiredMaxIndex = maxDestY * TILES_PER_LINE + maxDestX;
+        if (requiredMaxIndex >= 0) {
+            tiles.ensureSize(requiredMaxIndex + 1);
+        }
+
+        for (int y = 0; y < ssTileClipboardHeight; ++y) {
+            for (int x = 0; x < ssTileClipboardWidth; ++x) {
+                int dstX = destX + x;
+                int dstY = destY + y;
+                if (dstX < 0 || dstX >= TILES_PER_LINE || dstY < 0) {
+                    continue;
+                }
+
+                int dstIndex = dstY * TILES_PER_LINE + dstX;
+                int srcIndex = y * ssTileClipboardWidth + x;
+                if (dstIndex >= 0 && dstIndex < tiles.getSize() &&
+                    srcIndex >= 0 && srcIndex < static_cast<int>(ssTileClipboard.size())) {
+                    tiles.setTile(dstIndex, ssTileClipboard[srcIndex]);
+                }
+            }
+        }
+
+        Tiles newTiles = tiles;
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Paste Tile Selection",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
     }
 }
 
@@ -303,6 +457,100 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
     static ImVec2 rightClickStart;
     static bool rightClickTracking = false;
 
+    auto copySelectionToClipboard = [this]() {
+        int copyWidth = ssSelTileX1 - ssSelTileX0 + 1;
+        int copyHeight = ssSelTileY1 - ssSelTileY0 + 1;
+
+        ssTileClipboard.clear();
+        ssTileClipboard.reserve(static_cast<size_t>(copyWidth * copyHeight));
+
+        TileData emptyTile = {};
+        for (int y = 0; y < copyHeight; ++y) {
+            for (int x = 0; x < copyWidth; ++x) {
+                int srcX = ssSelTileX0 + x;
+                int srcY = ssSelTileY0 + y;
+                int tileIndex = srcY * TILES_PER_LINE + srcX;
+
+                if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
+                    ssTileClipboard.push_back(tiles.getTile(tileIndex));
+                }
+                else {
+                    ssTileClipboard.push_back(emptyTile);
+                }
+            }
+        }
+
+        ssTileClipboardWidth = copyWidth;
+        ssTileClipboardHeight = copyHeight;
+    };
+
+    auto clearSelectionTiles = [this]() {
+        Tiles oldTiles = tiles;
+
+        TileData emptyTile = {};
+        for (int y = ssSelTileY0; y <= ssSelTileY1; ++y) {
+            for (int x = ssSelTileX0; x <= ssSelTileX1; ++x) {
+                int tileIndex = y * TILES_PER_LINE + x;
+                if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
+                    tiles.setTile(tileIndex, emptyTile);
+                }
+            }
+        }
+
+        Tiles newTiles = tiles;
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Clear Tile Selection",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
+    };
+
+    auto pasteClipboardToSelection = [this]() {
+        Tiles oldTiles = tiles;
+
+        int destX = ssSelTileX0;
+        int destY = ssSelTileY0;
+
+        int maxDestX = SDL_min(TILES_PER_LINE - 1, destX + ssTileClipboardWidth - 1);
+        int maxDestY = destY + ssTileClipboardHeight - 1;
+        int requiredMaxIndex = maxDestY * TILES_PER_LINE + maxDestX;
+        if (requiredMaxIndex >= 0) {
+            tiles.ensureSize(requiredMaxIndex + 1);
+        }
+
+        for (int y = 0; y < ssTileClipboardHeight; ++y) {
+            for (int x = 0; x < ssTileClipboardWidth; ++x) {
+                int dstX = destX + x;
+                int dstY = destY + y;
+                if (dstX < 0 || dstX >= TILES_PER_LINE || dstY < 0) {
+                    continue;
+                }
+
+                int dstIndex = dstY * TILES_PER_LINE + dstX;
+                int srcIndex = y * ssTileClipboardWidth + x;
+                if (dstIndex >= 0 && dstIndex < tiles.getSize() &&
+                    srcIndex >= 0 && srcIndex < static_cast<int>(ssTileClipboard.size())) {
+                    tiles.setTile(dstIndex, ssTileClipboard[srcIndex]);
+                }
+            }
+        }
+
+        Tiles newTiles = tiles;
+        undoManager.execute(std::make_unique<LambdaAction>(
+            "Paste Tile Selection",
+            [this, newTiles]() {
+                this->tiles = newTiles;
+            },
+            [this, oldTiles]() {
+                this->tiles = oldTiles;
+            }
+        ));
+    };
+
     if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         rightClickStart = ImGui::GetIO().MousePos;
         rightClickTracking = true;
@@ -323,6 +571,7 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
 
     if (ImGui::BeginPopup("SpritesheetContextMenu")) {
         bool hasTiles = tiles.getSize() > 0 && !palettes.empty();
+        bool hasClipboard = !ssTileClipboard.empty() && ssTileClipboardWidth > 0 && ssTileClipboardHeight > 0;
 
         if (ImGui::MenuItem(ICON_FA_FILE_EXPORT " Export Selection as Image...", nullptr, false, ssHasSelection && hasTiles)) {
             nfdchar_t* outPath = nullptr;
@@ -338,6 +587,20 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !ssHasSelection) {
             ImGui::SetTooltip("Select a region first by dragging on the spritesheet");
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::MenuItem(ICON_FA_COPY " Copy", InputManager::Copy.label.c_str(), false, ssHasSelection && hasTiles)) {
+            copySelectionToClipboard();
+        }
+
+        if (ImGui::MenuItem(ICON_FA_PASTE " Paste", InputManager::Paste.label.c_str(), false, ssHasSelection && hasTiles && hasClipboard)) {
+            pasteClipboardToSelection();
+        }
+
+        if (ImGui::MenuItem(ICON_FA_ERASER " Delete", InputManager::Delete.label.c_str(), false, ssHasSelection && hasTiles)) {
+            clearSelectionTiles();
         }
 
         ImGui::Separator();
