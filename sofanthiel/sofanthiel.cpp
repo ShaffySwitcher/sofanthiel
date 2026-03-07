@@ -39,7 +39,7 @@ bool Sofanthiel::init()
         return false;
     }
 
-    this->window = SDL_CreateWindow("Sofanthiel (v2.15)", 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    this->window = SDL_CreateWindow("Sofanthiel (v2.15a)", 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (this->window == nullptr)
     {
         SDL_Log("Error creating window: %s\n", SDL_GetError());

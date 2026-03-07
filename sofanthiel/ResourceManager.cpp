@@ -200,17 +200,26 @@ std::vector<ParsedCPaletteGroup> ResourceManager::parsePalettesFromCFile(const s
     file.close();
 
     // i should have learned rust
-    std::regex groupRegex(R"(Palette\s+(\w+)\s*\[\s*\]\s*=\s*\{([\s\S]*?)\};)");
+    std::regex declRegex(R"(Palette\s+(\w+)\s*\[\s*\]\s*=\s*\{)");
     std::regex paletteBlockRegex(R"(\{([^{}]*)\})");
     std::regex colorRegex(R"(TO_RGB555\s*\(\s*0x([0-9A-Fa-f]{4,6})\s*\))");
 
-    auto groupBegin = std::sregex_iterator(content.begin(), content.end(), groupRegex); // looks to the moon
-    auto groupEnd = std::sregex_iterator(); // five pebbles
+    auto declBegin = std::sregex_iterator(content.begin(), content.end(), declRegex); // looks to the moon
+    auto declEnd = std::sregex_iterator(); // five pebbles
 
-    for (auto git = groupBegin; git != groupEnd; ++git) {
+    for (auto dit = declBegin; dit != declEnd; ++dit) {
         ParsedCPaletteGroup group;
-        group.name = (*git)[1].str();
-        std::string groupBody = (*git)[2].str();
+        group.name = (*dit)[1].str();
+
+        size_t braceStart = dit->position() + dit->length() - 1;
+        int depth = 1;
+        size_t pos = braceStart + 1;
+        while (pos < content.size() && depth > 0) {
+            if (content[pos] == '{') depth++;
+            else if (content[pos] == '}') depth--;
+            pos++;
+        }
+        std::string groupBody = content.substr(braceStart + 1, pos - braceStart - 2);
 
         auto palBegin = std::sregex_iterator(groupBody.begin(), groupBody.end(), paletteBlockRegex);
         auto palEnd = std::sregex_iterator();
