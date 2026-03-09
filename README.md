@@ -1,5 +1,7 @@
 # Sofanthiel
 
+Rhythm Tengoku animation editor for Windows/Linux using [decomp-friendly](https://github.com/arthurtilly/rhythmtengoku) formats.
+
 Download nightly builds here:
 
 [Windows](https://nightly.link/ShaffySwitcher/sofanthiel/workflows/build/main/sofanthiel-windows.zip) | [Linux](https://nightly.link/ShaffySwitcher/sofanthiel/workflows/build/main/sofanthiel-linux.zip)
