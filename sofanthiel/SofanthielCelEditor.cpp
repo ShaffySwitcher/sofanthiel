@@ -3,6 +3,29 @@
 #include "InputManager.h"
 #include "UndoRedo.h"
 
+namespace {
+
+std::vector<int> buildCelRenderOrder(const AnimationCel& cel)
+{
+    std::vector<int> indices(cel.oams.size());
+    for (int i = 0; i < static_cast<int>(cel.oams.size()); ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+
+    std::stable_sort(indices.begin(), indices.end(), [&cel](int lhs, int rhs) {
+        const TengokuOAM& left = cel.oams[static_cast<size_t>(lhs)];
+        const TengokuOAM& right = cel.oams[static_cast<size_t>(rhs)];
+        if (left.priority != right.priority) {
+            return left.priority > right.priority;
+        }
+        return lhs > rhs;
+    });
+
+    return indices;
+}
+
+}
+
 void Sofanthiel::handleCelInfobar() {
     ImGui::Begin("Cel Info", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
 
@@ -88,7 +111,7 @@ void Sofanthiel::handleCelPreview() {
                 if (idx >= 0 && idx < cel.oams.size()) {
                     cel.oams[idx].xPosition = SDL_clamp(
                         cel.oams[idx].xPosition + deltaX,
-                        -128, 127
+                        -256, 255
                     );
                     cel.oams[idx].yPosition = SDL_clamp(
                         cel.oams[idx].yPosition + deltaY,
@@ -192,9 +215,10 @@ void Sofanthiel::drawCelPreviewContent(const ImVec2& origin) {
         IM_COL32(255, 0, 0, 255)
     );
 
-    for (int i = cel.oams.size() - 1; i >= 0; i--) {
-        const TengokuOAM& oam = cel.oams[i];
-        bool isSelected = std::find(selectedOAMIndices.begin(), selectedOAMIndices.end(), i) != selectedOAMIndices.end();
+    const std::vector<int> renderOrder = buildCelRenderOrder(cel);
+    for (int index : renderOrder) {
+        const TengokuOAM& oam = cel.oams[static_cast<size_t>(index)];
+        const bool isSelected = std::find(selectedOAMIndices.begin(), selectedOAMIndices.end(), index) != selectedOAMIndices.end();
 
         float alpha = (!isSelected && emphasizeSelectedOAMs) ? 0.7f : 1.0f;
         renderOAM(drawList, origin, previewView.zoom, oam, offsetX, offsetY, alpha);
@@ -281,11 +305,11 @@ void Sofanthiel::handleOAMDragging(const ImVec2& origin, float offsetX, float of
                     int idx = selectedOAMIndices[i];
                     if (idx >= 0 && idx < cel.oams.size() && i < selectedOAMStartPositions.size()) {
                         cel.oams[idx].xPosition = SDL_clamp(
-                            selectedOAMStartPositions[i].x + deltaX,
-                            -128, 127
+                            static_cast<int>(selectedOAMStartPositions[i].x) + deltaX,
+                            -256, 255
                         );
                         cel.oams[idx].yPosition = SDL_clamp(
-                            selectedOAMStartPositions[i].y + deltaY,
+                            static_cast<int>(selectedOAMStartPositions[i].y) + deltaY,
                             -128, 127
                         );
                     }
@@ -400,13 +424,15 @@ void Sofanthiel::handleCelOAMs() {
     AnimationCel& cel = animationCels[editingCelIndex];
 
     if (ImGui::Button(ICON_FA_PLUS " Add OAM")) {
-        TengokuOAM newOAM;
+        TengokuOAM newOAM = {};
         newOAM.xPosition = 0;
         newOAM.yPosition = 0;
         newOAM.tileID = 0;
         newOAM.palette = 0;
         newOAM.objShape = SHAPE_SQUARE;
         newOAM.objSize = 0;
+        newOAM.priority = 0;
+        newOAM.objMode = OBJ_MODE_NORMAL;
         newOAM.hFlip = false;
         newOAM.vFlip = false;
 
@@ -416,7 +442,7 @@ void Sofanthiel::handleCelOAMs() {
         auto oamsAfter = cel.oams;
 
         selectedOAMIndices.clear();
-        selectedOAMIndices.push_back(cel.oams.size() - 1);
+        selectedOAMIndices.push_back(static_cast<int>(cel.oams.size()) - 1);
 
         undoManager.execute(std::make_unique<OAMModifyAction>(
             "Add OAM",
@@ -607,7 +633,7 @@ void Sofanthiel::handleCelOAMs() {
             for (size_t s = 0; s < selectedOAMIndices.size(); s++) {
                 int& selIdx = selectedOAMIndices[s];
                 if (selIdx == srcIdx)
-                    selIdx = cel.oams.size() - 1;
+                    selIdx = static_cast<int>(cel.oams.size()) - 1;
                 else if (selIdx > srcIdx)
                     selIdx--;
             }
@@ -661,6 +687,13 @@ void Sofanthiel::handleCelEditor() {
     int palette = oam.palette;
     int objShape = oam.objShape;
     int objSize = oam.objSize;
+    int priority = oam.priority;
+    int objMode = oam.objMode;
+    int affineIndex = getAffineIndex(oam);
+    bool affineFlag = isAffineOAM(oam);
+    bool objDisable = oam.objDisable != 0;
+    bool mosaicFlag = oam.mosaicFlag != 0;
+    bool paletteMode = is8bppOAM(oam);
     bool hFlip = oam.hFlip;
     bool vFlip = oam.vFlip;
 
@@ -682,11 +715,11 @@ void Sofanthiel::handleCelEditor() {
     ImGui::SetColumnWidth(0, halfWidth);
 
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
-    if (ImGui::DragInt("X##pos", &xPosition, 1.0f, -128, 127, "%d")) {
+    if (ImGui::DragInt("X##pos", &xPosition, 1.0f, -256, 255, "%d")) {
         int delta = xPosition - oam.xPosition;
         for (int idx : selectedOAMIndices) {
             if (idx >= 0 && idx < cel.oams.size()) {
-                cel.oams[idx].xPosition = SDL_clamp(cel.oams[idx].xPosition + delta, -128, 127);
+                cel.oams[idx].xPosition = SDL_clamp(cel.oams[idx].xPosition + delta, -256, 255);
             }
         }
     }
@@ -708,10 +741,17 @@ void Sofanthiel::handleCelEditor() {
     ImGui::Columns(2, "TilePaletteColumns", false);
     ImGui::SetColumnWidth(0, halfWidth);
 
+    const int maxTileID = tiles.getSize() > 0
+        ? (is8bppOAM(oam) ? ((tiles.getSize() - 1) * 2) : (tiles.getSize() - 1))
+        : 0;
+
     ImGui::Text("Tile ID:");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
     if (ImGui::InputInt("##tileid", &tileID, 1, 10)) {
-        int clampedTileID = SDL_clamp(tileID, 0, tiles.getSize() - 1);
+        int clampedTileID = SDL_clamp(tileID, 0, maxTileID);
+        if (paletteMode) {
+            clampedTileID &= ~1;
+        }
         for (int idx : selectedOAMIndices) {
             if (idx >= 0 && idx < cel.oams.size()) {
                 cel.oams[idx].tileID = clampedTileID;
@@ -722,14 +762,82 @@ void Sofanthiel::handleCelEditor() {
 
     ImGui::Text("Palette:");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
-    if (ImGui::SliderInt("##palette", &palette, 0, palettes.size() - 1)) {
-        int clampedPalette = SDL_clamp(palette, 0, palettes.size() - 1);
+    if (paletteMode) {
+        ImGui::BeginDisabled();
+        ImGui::SliderInt("##palette", &palette, 0, palettes.empty() ? 0 : static_cast<int>(palettes.size()) - 1);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Palette bank is ignored for 8bpp OBJ mode");
+        }
+    }
+    else if (!palettes.empty() && ImGui::SliderInt("##palette", &palette, 0, static_cast<int>(palettes.size()) - 1)) {
+        int clampedPalette = SDL_clamp(palette, 0, static_cast<int>(palettes.size()) - 1);
         for (int idx : selectedOAMIndices) {
             if (idx >= 0 && idx < cel.oams.size()) {
                 cel.oams[idx].palette = clampedPalette;
             }
         }
     }
+    ImGui::Columns(1);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::Text("Attributes:");
+    ImGui::Columns(2, "AttributeColumns", false);
+    ImGui::SetColumnWidth(0, halfWidth);
+
+    const char* gfxModes[] = { "Normal", "Blend", "Window", "Prohibited" };
+    ImGui::Text("OBJ Mode:");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
+    if (ImGui::Combo("##objmode", &objMode, gfxModes, IM_ARRAYSIZE(gfxModes))) {
+        const int clampedMode = SDL_clamp(objMode, 0, 3);
+        for (int idx : selectedOAMIndices) {
+            if (idx >= 0 && idx < cel.oams.size()) {
+                cel.oams[idx].objMode = clampedMode;
+            }
+        }
+    }
+
+    ImGui::Text("Priority:");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
+    if (ImGui::SliderInt("##priority", &priority, 0, 3)) {
+        const int clampedPriority = SDL_clamp(priority, 0, 3);
+        for (int idx : selectedOAMIndices) {
+            if (idx >= 0 && idx < cel.oams.size()) {
+                cel.oams[idx].priority = clampedPriority;
+            }
+        }
+    }
+
+    ImGui::NextColumn();
+
+    const char* colorModes[] = { "4bpp / 16-color", "8bpp / 256-color" };
+    int colorMode = paletteMode ? 1 : 0;
+    ImGui::Text("Color Mode:");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
+    if (ImGui::Combo("##colormode", &colorMode, colorModes, IM_ARRAYSIZE(colorModes))) {
+        const bool enable8bpp = (colorMode == 1);
+        for (int idx : selectedOAMIndices) {
+            if (idx >= 0 && idx < cel.oams.size()) {
+                cel.oams[idx].paletteMode = enable8bpp ? 1 : 0;
+                if (enable8bpp) {
+                    cel.oams[idx].tileID &= ~1;
+                }
+            }
+        }
+        paletteMode = enable8bpp;
+    }
+
+    if (ImGui::Checkbox("Mosaic", &mosaicFlag)) {
+        for (int idx : selectedOAMIndices) {
+            if (idx >= 0 && idx < cel.oams.size()) {
+                cel.oams[idx].mosaicFlag = mosaicFlag;
+            }
+        }
+    }
+
     ImGui::Columns(1);
 
     ImGui::Spacing();
@@ -803,25 +911,72 @@ void Sofanthiel::handleCelEditor() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Columns(2, "FlipColumns", false);
+    ImGui::Text("Affine / Display:");
+    if (ImGui::Checkbox("Affine", &affineFlag)) {
+        for (int idx : selectedOAMIndices) {
+            if (idx >= 0 && idx < cel.oams.size()) {
+                cel.oams[idx].affineFlag = affineFlag;
+            }
+        }
+    }
+
+    ImGui::Columns(2, "AffineColumns", false);
     ImGui::SetColumnWidth(0, halfWidth);
 
-    if (ImGui::Checkbox("Horizontal Flip", &hFlip)) {
-        for (int idx : selectedOAMIndices) {
-            if (idx >= 0 && idx < cel.oams.size()) {
-                cel.oams[idx].hFlip = hFlip;
+    if (affineFlag) {
+        ImGui::Text("Affine Index:");
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.8f);
+        if (ImGui::SliderInt("##affineindex", &affineIndex, 0, 31)) {
+            const uint8_t clampedIndex = static_cast<uint8_t>(SDL_clamp(affineIndex, 0, 31));
+            for (int idx : selectedOAMIndices) {
+                if (idx >= 0 && idx < cel.oams.size()) {
+                    setAffineIndex(cel.oams[idx], clampedIndex);
+                }
             }
         }
     }
+    else {
+        if (ImGui::Checkbox("Horizontal Flip", &hFlip)) {
+            for (int idx : selectedOAMIndices) {
+                if (idx >= 0 && idx < cel.oams.size()) {
+                    cel.oams[idx].hFlip = hFlip;
+                }
+            }
+        }
+
+        if (ImGui::Checkbox("Vertical Flip", &vFlip)) {
+            for (int idx : selectedOAMIndices) {
+                if (idx >= 0 && idx < cel.oams.size()) {
+                    cel.oams[idx].vFlip = vFlip;
+                }
+            }
+        }
+    }
+
     ImGui::NextColumn();
 
-    if (ImGui::Checkbox("Vertical Flip", &vFlip)) {
-        for (int idx : selectedOAMIndices) {
-            if (idx >= 0 && idx < cel.oams.size()) {
-                cel.oams[idx].vFlip = vFlip;
+    if (affineFlag) {
+        if (ImGui::Checkbox("Double Size", &objDisable)) {
+            for (int idx : selectedOAMIndices) {
+                if (idx >= 0 && idx < cel.oams.size()) {
+                    cel.oams[idx].objDisable = objDisable;
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When affine is enabled, this flag becomes the double-size bit");
+        }
+    }
+    else {
+        if (ImGui::Checkbox("Hidden", &objDisable)) {
+            for (int idx : selectedOAMIndices) {
+                if (idx >= 0 && idx < cel.oams.size()) {
+                    cel.oams[idx].objDisable = objDisable;
+                }
             }
         }
     }
+
     ImGui::Columns(1);
 
     ImGui::Spacing();
@@ -829,7 +984,12 @@ void Sofanthiel::handleCelEditor() {
     ImGui::Spacing();
 
     ImGui::Text("Tiles Used: %d (%d x %d)", (width / 8) * (height / 8), width / 8, height / 8);
-    ImGui::Text("Tile Range: %d to %d", tileID, tileID + (width / 8) * (height / 8) - 1);
+    const int lastTileX = (width / 8) - 1;
+    const int lastTileY = (height / 8) - 1;
+    const int lastTileID = (lastTileX >= 0 && lastTileY >= 0)
+        ? (tileID + lastTileY * TILES_PER_LINE + lastTileX * (paletteMode ? 2 : 1))
+        : tileID;
+    ImGui::Text("Tile Range: %d to %d", tileID, lastTileID);
 
     ImGui::End();
 }
@@ -841,7 +1001,7 @@ void Sofanthiel::handleCelSpritesheet()
     ImGui::BeginChild("CelSpritesheetContent", ImVec2(0, 0), ImGuiChildFlags_None);
 
     ImVec2 contentCenter = calculateContentCenter();
-    ImVec2 baseSize = ImVec2(tiles.getWidth(), tiles.getHeight());
+    ImVec2 baseSize = ImVec2(static_cast<float>(tiles.getWidth()), static_cast<float>(tiles.getHeight()));
     ImVec2 origin = spritesheetView.calculateOrigin(contentCenter, baseSize);
 
     drawCelSpritesheetContent(origin);
@@ -899,7 +1059,7 @@ void Sofanthiel::drawCelSpritesheetTiles(ImDrawList* drawList, const ImVec2& ori
 
                 for (int ty = 0; ty < height / 8; ty++) {
                     for (int tx = 0; tx < width / 8; tx++) {
-                        int tileIdx = oam.tileID + ty * 32 + tx;
+                        int tileIdx = getTileIndexForOffset(oam, tx, ty);
                         usedTileIndices.push_back(tileIdx);
                     }
                 }
@@ -931,7 +1091,10 @@ void Sofanthiel::drawCelSpritesheetTiles(ImDrawList* drawList, const ImVec2& ori
         if (editingCelIndex >= 0 && editingCelIndex < static_cast<int>(animationCels.size()) &&
             !selectedOAMIndices.empty() && selectedOAMIndices[0] >= 0 &&
             selectedOAMIndices[0] < static_cast<int>(animationCels[editingCelIndex].oams.size())) {
-            currentPalette = animationCels[editingCelIndex].oams[selectedOAMIndices[0]].palette;
+            const TengokuOAM& selectedOAM = animationCels[editingCelIndex].oams[selectedOAMIndices[0]];
+            if (!is8bppOAM(selectedOAM)) {
+                currentPalette = selectedOAM.palette;
+            }
         }
         drawSingleTile(drawList, xPos, yPos, i);
 		currentPalette = oldCurrentPalette;
@@ -964,7 +1127,7 @@ void Sofanthiel::handleCelSpritesheetClicks(const ImVec2& origin)
     AnimationCel& cel = animationCels[editingCelIndex];
     for (int idx : selectedOAMIndices) {
         if (idx >= 0 && idx < cel.oams.size()) {
-            cel.oams[idx].tileID = tileIndex;
+            cel.oams[idx].tileID = getTileIdFromBaseIndex(cel.oams[idx], tileIndex);
         }
     }
 }

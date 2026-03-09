@@ -1151,6 +1151,79 @@ static void getOAMDimensionsStatic(int objShape, int objSize, int& width, int& h
     }
 }
 
+namespace {
+
+constexpr int kExportMosaicSize = 2;
+
+bool shouldExportOAM(const TengokuOAM& oam)
+{
+    return !isHiddenOAM(oam) && oam.objMode != OBJ_MODE_WINDOW && oam.objMode != OBJ_MODE_PROHIBITED;
+}
+
+float getExportBlendFactor(const TengokuOAM& oam)
+{
+    return (oam.objMode == OBJ_MODE_BLEND) ? 0.6f : 1.0f;
+}
+
+int getExportMosaicSize(const TengokuOAM& oam)
+{
+    return oam.mosaicFlag ? kExportMosaicSize : 1;
+}
+
+std::vector<int> buildExportRenderOrder(const AnimationCel& cel)
+{
+    std::vector<int> indices(cel.oams.size());
+    for (int i = 0; i < static_cast<int>(cel.oams.size()); ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+
+    std::stable_sort(indices.begin(), indices.end(), [&cel](int lhs, int rhs) {
+        const TengokuOAM& left = cel.oams[static_cast<size_t>(lhs)];
+        const TengokuOAM& right = cel.oams[static_cast<size_t>(rhs)];
+        if (left.priority != right.priority) {
+            return left.priority > right.priority;
+        }
+        return lhs > rhs;
+    });
+
+    return indices;
+}
+
+// this is like completely made up i have no fucking idea how the gba does it
+void blendPixel(std::vector<uint8_t>& frameBuffer, int pixelIndex, const SDL_Color& color, float alpha)
+{
+    const int idx = pixelIndex * 4;
+    const float srcAlpha = SDL_clamp(alpha, 0.0f, 1.0f);
+    const float dstAlpha = frameBuffer[idx + 3] / 255.0f;
+    const float outAlpha = srcAlpha + dstAlpha * (1.0f - srcAlpha);
+
+    if (outAlpha <= 0.0f) {
+        frameBuffer[idx + 0] = 0;
+        frameBuffer[idx + 1] = 0;
+        frameBuffer[idx + 2] = 0;
+        frameBuffer[idx + 3] = 0;
+        return;
+    }
+
+    const float dstR = frameBuffer[idx + 0] / 255.0f;
+    const float dstG = frameBuffer[idx + 1] / 255.0f;
+    const float dstB = frameBuffer[idx + 2] / 255.0f;
+    const float srcR = color.r / 255.0f;
+    const float srcG = color.g / 255.0f;
+    const float srcB = color.b / 255.0f;
+
+    const float outR = (srcR * srcAlpha + dstR * dstAlpha * (1.0f - srcAlpha)) / outAlpha;
+    const float outG = (srcG * srcAlpha + dstG * dstAlpha * (1.0f - srcAlpha)) / outAlpha;
+    const float outB = (srcB * srcAlpha + dstB * dstAlpha * (1.0f - srcAlpha)) / outAlpha;
+
+    frameBuffer[idx + 0] = static_cast<uint8_t>(SDL_clamp(outR * 255.0f, 0.0f, 255.0f));
+    frameBuffer[idx + 1] = static_cast<uint8_t>(SDL_clamp(outG * 255.0f, 0.0f, 255.0f));
+    frameBuffer[idx + 2] = static_cast<uint8_t>(SDL_clamp(outB * 255.0f, 0.0f, 255.0f));
+    frameBuffer[idx + 3] = static_cast<uint8_t>(SDL_clamp(outAlpha * 255.0f, 0.0f, 255.0f));
+}
+
+}
+
 bool ResourceManager::exportAnimationToGif(const std::string& path,
     const std::vector<Animation>& animations, int animIndex,
     const std::vector<AnimationCel>& cels,
@@ -1180,6 +1253,10 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
         if (!cel) continue;
 
         for (const auto& oam : cel->oams) {
+            if (!shouldExportOAM(oam)) {
+                continue;
+            }
+
             int oamW = 0, oamH = 0;
             getOAMDimensionsStatic(oam.objShape, oam.objSize, oamW, oamH);
 
@@ -1215,10 +1292,18 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
         }
         if (!cel) continue;
         for (const auto& oam : cel->oams) {
-            int palIdx = oam.palette;
-            if (palIdx >= static_cast<int>(palettes.size())) continue;
-            for (int ci = 1; ci < 16; ci++) {
-                const SDL_Color& clr = palettes[palIdx].colors[ci];
+            if (!shouldExportOAM(oam)) {
+                continue;
+            }
+
+            const int colorLimit = is8bppOAM(oam)
+                ? std::min(255, static_cast<int>(palettes.size()) * 16 - 1)
+                : 15;
+            for (int ci = 1; ci <= colorLimit; ++ci) {
+                SDL_Color clr = {};
+                if (!getOAMColor(palettes, oam, static_cast<uint8_t>(ci), clr)) {
+                    continue;
+                }
                 usedColors.insert(((uint32_t)clr.r << 16) | ((uint32_t)clr.g << 8) | clr.b);
             }
         }
@@ -1277,23 +1362,26 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
         memset(frameBuffer.data(), 0, frameBuffer.size());
 
         if (cel) {
-            for (int i = static_cast<int>(cel->oams.size()) - 1; i >= 0; i--) {
-                const TengokuOAM& oam = cel->oams[i];
+            const std::vector<int> renderOrder = buildExportRenderOrder(*cel);
+            for (int renderIndex : renderOrder) {
+                const TengokuOAM& oam = cel->oams[static_cast<size_t>(renderIndex)];
+                if (!shouldExportOAM(oam)) {
+                    continue;
+                }
 
                 int oamW = 0, oamH = 0;
                 getOAMDimensionsStatic(oam.objShape, oam.objSize, oamW, oamH);
 
-                int paletteIndex = oam.palette;
-                if (paletteIndex >= static_cast<int>(palettes.size()) || palettes.empty()) continue;
-
                 float baseX = oam.xPosition + offsetX;
                 float baseY = oam.yPosition + offsetY;
+                const float blendFactor = getExportBlendFactor(oam);
+                const int mosaicSize = getExportMosaicSize(oam);
 
                 for (int ty = 0; ty < oamH / 8; ty++) {
                     for (int tx = 0; tx < oamW / 8; tx++) {
                         int tileX = oam.hFlip ? (oamW / 8 - 1 - tx) : tx;
                         int tileY = oam.vFlip ? (oamH / 8 - 1 - ty) : ty;
-                        int tileIdx = oam.tileID + tileY * 32 + tileX;
+                        int tileIdx = getTileIndexForOffset(oam, tileX, tileY);
 
                         if (tileIdx >= tiles.getSize()) continue;
 
@@ -1301,13 +1389,14 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
 
                         for (int py = 0; py < 8; py++) {
                             for (int px = 0; px < 8; px++) {
-                                int pixelX = oam.hFlip ? (7 - px) : px;
-                                int pixelY = oam.vFlip ? (7 - py) : py;
+                                int sampleX = (px / mosaicSize) * mosaicSize;
+                                int sampleY = (py / mosaicSize) * mosaicSize;
+                                int pixelX = oam.hFlip ? (7 - sampleX) : sampleX;
+                                int pixelY = oam.vFlip ? (7 - sampleY) : sampleY;
 
                                 uint8_t colorIdx = tile.data[pixelY][pixelX];
-                                if (colorIdx == 0) continue;
-
-                                SDL_Color color = palettes[paletteIndex].colors[colorIdx];
+                                SDL_Color color = {};
+                                if (!getOAMColor(palettes, oam, colorIdx, color)) continue;
 
                                 int imgX = static_cast<int>(baseX + tx * 8 + px) - bboxMinX;
                                 int imgY = static_cast<int>(baseY + ty * 8 + py) - bboxMinY;
@@ -1317,11 +1406,7 @@ bool ResourceManager::exportAnimationToGif(const std::string& path,
                                         int finalX = imgX * scale + sx;
                                         int finalY = imgY * scale + sy;
                                         if (finalX >= 0 && finalX < cropW && finalY >= 0 && finalY < cropH) {
-                                            int idx = (finalY * cropW + finalX) * 4;
-                                            frameBuffer[idx + 0] = color.r;
-                                            frameBuffer[idx + 1] = color.g;
-                                            frameBuffer[idx + 2] = color.b;
-                                            frameBuffer[idx + 3] = 255;
+                                            blendPixel(frameBuffer, finalY * cropW + finalX, color, blendFactor);
                                         }
                                     }
                                 }

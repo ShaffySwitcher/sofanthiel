@@ -148,8 +148,7 @@ private:
         const TengokuOAM& oam, float offsetX, float offsetY, float alpha);
     void getOAMDimensions(int objShape, int objSize, int& width, int& height);
     void renderTile(ImDrawList* drawList, float xPos, float yPos, float zoom,
-        int tileIdx, int tx, int ty, int paletteIndex,
-        bool hFlip, bool vFlip, float alpha);
+        const TengokuOAM& oam, int tileIdx, int tx, int ty, float alpha);
 
     void drawGrid(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float zoom);
     void drawBackground(ImDrawList* drawList, ImVec2 origin, ImVec2 size, float* color);

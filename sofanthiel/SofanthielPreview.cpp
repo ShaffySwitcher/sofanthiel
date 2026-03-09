@@ -1,6 +1,65 @@
 #include "Sofanthiel.h"
 #include "IconsFontAwesome6.h"
 
+namespace {
+
+constexpr int kPreviewMosaicSize = 2;
+
+bool shouldRenderOAM(const TengokuOAM& oam)
+{
+    return !isHiddenOAM(oam) && oam.objMode != OBJ_MODE_WINDOW && oam.objMode != OBJ_MODE_PROHIBITED;
+}
+
+float getRenderAlpha(const TengokuOAM& oam, float alpha)
+{
+    return (oam.objMode == OBJ_MODE_BLEND) ? (alpha * 0.6f) : alpha;
+}
+
+int getMosaicSize(const TengokuOAM& oam)
+{
+    return oam.mosaicFlag ? kPreviewMosaicSize : 1;
+}
+
+std::vector<int> buildRenderOrder(const AnimationCel& cel)
+{
+    std::vector<int> indices(cel.oams.size());
+    for (int i = 0; i < static_cast<int>(cel.oams.size()); ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+
+    std::stable_sort(indices.begin(), indices.end(), [&cel](int lhs, int rhs) {
+        const TengokuOAM& left = cel.oams[static_cast<size_t>(lhs)];
+        const TengokuOAM& right = cel.oams[static_cast<size_t>(rhs)];
+        if (left.priority != right.priority) {
+            return left.priority > right.priority;
+        }
+        return lhs > rhs;
+    });
+
+    return indices;
+}
+
+std::vector<int> buildHitTestOrder(const AnimationCel& cel)
+{
+    std::vector<int> indices(cel.oams.size());
+    for (int i = 0; i < static_cast<int>(cel.oams.size()); ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+
+    std::stable_sort(indices.begin(), indices.end(), [&cel](int lhs, int rhs) {
+        const TengokuOAM& left = cel.oams[static_cast<size_t>(lhs)];
+        const TengokuOAM& right = cel.oams[static_cast<size_t>(rhs)];
+        if (left.priority != right.priority) {
+            return left.priority < right.priority;
+        }
+        return lhs < rhs;
+    });
+
+    return indices;
+}
+
+}
+
 void Sofanthiel::handlePreview()
 {
     ImGui::Begin("Preview", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -104,7 +163,7 @@ void Sofanthiel::drawPreviewInfoPanel(ViewManager& view, ImVec2 mousePosInWindow
     ImGui::Text("Anim Offset:");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(getScaledSize(80));
-	ImGui::DragFloat2("##AnimOffset", (float*)&previewAnimationOffset, 1.0f, -128.0f, 127.0f, "%.0f");
+    ImGui::DragFloat2("##AnimOffset", (float*)&previewAnimationOffset, 1.0f, -256.0f, 255.0f, "%.0f");
 }
 
 void Sofanthiel::drawBackgroundTexture(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize) {
@@ -192,8 +251,9 @@ void Sofanthiel::drawCurrentAnimationFrame(ImDrawList* drawList, ImVec2 origin, 
     float offsetX = previewSize.x / 2.0f + previewAnimationOffset.x;
     float offsetY = previewSize.y / 2.0f + previewAnimationOffset.y;
 
-    for (int i = cel->oams.size() - 1; i >= 0; i--) {
-        const TengokuOAM& oam = cel->oams[i];
+    const std::vector<int> renderOrder = buildRenderOrder(*cel);
+    for (int index : renderOrder) {
+        const TengokuOAM& oam = cel->oams[static_cast<size_t>(index)];
         renderOAM(drawList, origin, zoom, oam, offsetX, offsetY, 1.0f);
     }
 }
@@ -242,7 +302,7 @@ void Sofanthiel::handleAnimationDragging()
         isPreviewAnimationDragging = false;
     }
 
-    previewAnimationOffset.x = SDL_clamp(previewAnimationOffset.x, -128.0f, 127.0f);
+    previewAnimationOffset.x = SDL_clamp(previewAnimationOffset.x, -256.0f, 255.0f);
     previewAnimationOffset.y = SDL_clamp(previewAnimationOffset.y, -128.0f, 127.0f);
 }
 
@@ -281,7 +341,13 @@ bool Sofanthiel::isMouseOverAnimation(const ImVec2& mousePos)
     float offsetX = previewSize.x / 2.0f + previewAnimationOffset.x;
     float offsetY = previewSize.y / 2.0f + previewAnimationOffset.y;
 
-    for (const TengokuOAM& oam : cel->oams) {
+    const std::vector<int> hitTestOrder = buildHitTestOrder(*cel);
+    for (int index : hitTestOrder) {
+        const TengokuOAM& oam = cel->oams[static_cast<size_t>(index)];
+        if (!shouldRenderOAM(oam)) {
+            continue;
+        }
+
         int width = 0, height = 0;
         getOAMDimensions(oam.objShape, oam.objSize, width, height);
 
@@ -306,19 +372,23 @@ bool Sofanthiel::isMouseOverAnimation(const ImVec2& mousePos)
             if (oam.hFlip) tileX = (width / 8) - 1 - tileX;
             if (oam.vFlip) tileY = (height / 8) - 1 - tileY;
 
-            int tileIdx = oam.tileID + tileY * 32 + tileX;
+            int tileIdx = getTileIndexForOffset(oam, tileX, tileY);
             if (tileIdx >= tiles.getSize()) continue;
 
             int pixelX = localX % 8;
             int pixelY = localY % 8;
+
+            const int mosaicSize = getMosaicSize(oam);
+            pixelX = (pixelX / mosaicSize) * mosaicSize;
+            pixelY = (pixelY / mosaicSize) * mosaicSize;
 
             if (oam.hFlip) pixelX = 7 - pixelX;
             if (oam.vFlip) pixelY = 7 - pixelY;
 
             TileData tile = tiles.getTile(tileIdx);
             uint8_t colorIdx = tile.data[pixelY][pixelX];
-
-            if (colorIdx != 0) return true;
+            SDL_Color color = {};
+            if (getOAMColor(palettes, oam, colorIdx, color)) return true;
         }
     }
 
@@ -327,44 +397,46 @@ bool Sofanthiel::isMouseOverAnimation(const ImVec2& mousePos)
 
 void Sofanthiel::renderOAM(ImDrawList* drawList, ImVec2 origin, float zoom,
     const TengokuOAM& oam, float offsetX, float offsetY, float alpha) {
+    if (!shouldRenderOAM(oam)) {
+        return;
+    }
+
     int width = 0, height = 0;
     getOAMDimensions(oam.objShape, oam.objSize, width, height);
 
     float xPos = origin.x + (oam.xPosition + offsetX) * zoom;
     float yPos = origin.y + (oam.yPosition + offsetY) * zoom;
 
-    int paletteIndex = oam.palette;
-    if (paletteIndex >= palettes.size() || palettes.empty()) return;
+    const float renderAlpha = getRenderAlpha(oam, alpha);
 
     for (int ty = 0; ty < height / 8; ty++) {
         for (int tx = 0; tx < width / 8; tx++) {
             int tileX = oam.hFlip ? (width / 8 - 1 - tx) : tx;
             int tileY = oam.vFlip ? (height / 8 - 1 - ty) : ty;
-            int tileIdx = oam.tileID + tileY * 32 + tileX;
+            int tileIdx = getTileIndexForOffset(oam, tileX, tileY);
 
             if (tileIdx >= tiles.getSize()) continue;
 
-            renderTile(drawList, xPos, yPos, zoom, tileIdx, tx, ty,
-                paletteIndex, oam.hFlip, oam.vFlip, alpha);
+            renderTile(drawList, xPos, yPos, zoom, oam, tileIdx, tx, ty, renderAlpha);
         }
     }
 }
 
 void Sofanthiel::renderTile(ImDrawList* drawList, float xPos, float yPos, float zoom,
-    int tileIdx, int tx, int ty, int paletteIndex,
-    bool hFlip, bool vFlip, float alpha) {
+    const TengokuOAM& oam, int tileIdx, int tx, int ty, float alpha) {
     TileData tile = tiles.getTile(tileIdx);
+    const int mosaicSize = getMosaicSize(oam);
 
     for (int py = 0; py < 8; py++) {
         for (int px = 0; px < 8; px++) {
-            int pixelX = hFlip ? (7 - px) : px;
-            int pixelY = vFlip ? (7 - py) : py;
+            int sampleX = (px / mosaicSize) * mosaicSize;
+            int sampleY = (py / mosaicSize) * mosaicSize;
+            int pixelX = oam.hFlip ? (7 - sampleX) : sampleX;
+            int pixelY = oam.vFlip ? (7 - sampleY) : sampleY;
 
             uint8_t colorIdx = tile.data[pixelY][pixelX];
-
-            if (colorIdx == 0) continue;
-
-            SDL_Color color = palettes[paletteIndex].colors[colorIdx];
+            SDL_Color color = {};
+            if (!getOAMColor(palettes, oam, colorIdx, color)) continue;
 
             float finalX = xPos + (tx * 8 + px) * zoom;
             float finalY = yPos + (ty * 8 + py) * zoom;

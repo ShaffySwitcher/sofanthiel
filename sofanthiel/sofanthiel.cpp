@@ -39,7 +39,7 @@ bool Sofanthiel::init()
         return false;
     }
 
-    this->window = SDL_CreateWindow("Sofanthiel (v2.15a)", 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    this->window = SDL_CreateWindow("Sofanthiel (v2.20)", 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (this->window == nullptr)
     {
         SDL_Log("Error creating window: %s\n", SDL_GetError());
@@ -768,7 +768,7 @@ void Sofanthiel::handleMenuBar()
 
                     selectedOAMIndices.clear();
                     for (size_t i = 0; i < oamClipboard.size(); i++) {
-                        selectedOAMIndices.push_back(insertPos + i);
+                        selectedOAMIndices.push_back(insertPos + static_cast<int>(i));
                     }
                 }
             }
@@ -918,7 +918,7 @@ void Sofanthiel::handleMenuBar()
 
             selectedOAMIndices.clear();
             for (size_t i = 0; i < oamClipboard.size(); i++) {
-                selectedOAMIndices.push_back(insertPos + i);
+                selectedOAMIndices.push_back(insertPos + static_cast<int>(i));
             }
         }
     }
@@ -993,8 +993,8 @@ bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<Ani
         }
     };
 
-    auto canPlaceBlockWithOverlap = [&packedTileIndices, &ensureRows](int row, int col, int widthTiles, int heightTiles, const std::vector<int>& desiredTileIndices) {
-        if (col < 0 || widthTiles <= 0 || col + widthTiles > TILES_PER_LINE || heightTiles <= 0) {
+    auto canPlaceBlockWithOverlap = [&packedTileIndices, &ensureRows](int row, int col, int widthTiles, int heightTiles, int rowStride, const std::vector<int>& desiredTileIndices) {
+        if (col < 0 || widthTiles <= 0 || col + widthTiles > rowStride || heightTiles <= 0) {
             return false;
         }
 
@@ -1032,11 +1032,11 @@ bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<Ani
                 continue;
             }
 
-            const int oldTileID = static_cast<int>(oam.tileID);
+            const int rowStride = is8bppOAM(oam) ? (TILES_PER_LINE / 2) : TILES_PER_LINE;
             std::vector<int> desiredTileIndices(static_cast<size_t>(widthTiles * heightTiles), -1);
             for (int ty = 0; ty < heightTiles; ++ty) {
                 for (int tx = 0; tx < widthTiles; ++tx) {
-                    int srcTileIndex = oldTileID + ty * TILES_PER_LINE + tx;
+                    int srcTileIndex = getTileIndexForOffset(oam, tx, ty);
                     TileData tileData = {};
                     if (srcTileIndex >= 0 && srcTileIndex < originalTileCount) {
                         tileData = this->tiles.getTile(srcTileIndex);
@@ -1048,8 +1048,8 @@ bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<Ani
             int placedRow = -1;
             int placedCol = -1;
             for (int row = 0; placedRow < 0; ++row) {
-                for (int col = 0; col <= TILES_PER_LINE - widthTiles; ++col) {
-                    if (canPlaceBlockWithOverlap(row, col, widthTiles, heightTiles, desiredTileIndices)) {
+                for (int col = 0; col <= rowStride - widthTiles; ++col) {
+                    if (canPlaceBlockWithOverlap(row, col, widthTiles, heightTiles, rowStride, desiredTileIndices)) {
                         placedRow = row;
                         placedCol = col;
                         break;
@@ -1059,7 +1059,8 @@ bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<Ani
 
             placeBlock(placedRow, placedCol, widthTiles, heightTiles, desiredTileIndices);
 
-            int newTileID = placedRow * TILES_PER_LINE + placedCol;
+            const int newBaseIndex = placedRow * rowStride + placedCol;
+            int newTileID = getTileIdFromBaseIndex(oam, newBaseIndex);
             oam.tileID = static_cast<uint16_t>(newTileID);
         }
     }
