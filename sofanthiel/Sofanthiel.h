@@ -67,6 +67,8 @@ private:
     void render();
     void setupDockingLayout();
     void handleDPIChange();
+    float getCurrentDisplayScale() const;
+    void applyDisplayScale(float displayScale);
     void handleDroppedFile(const std::string& path);
     void saveProject(const std::string& path);
     void loadProject(const std::string& path);
@@ -158,6 +160,10 @@ private:
     bool isCelNameUnique(const std::string& name, int excludeIndex = -1) const;
     bool isAnimationNameUnique(const std::string& name, int excludeIndex = -1) const;
     void applyTheme();
+    void updateWindowTitle();
+    void handleAboutDialog();
+    std::string buildWindowTitle() const;
+    std::string getProjectDisplayName() const;
     
     float calculateRightAlignedPosition(const char* text, float padding = 0.0f);
     float calculateRightAlignedPosition(float elementWidth, float padding = 0.0f);
@@ -178,6 +184,7 @@ private:
     ImVec2 oamStartOffset;
     std::vector<ImVec2> selectedOAMStartPositions;
     bool showExitConfirmation = false;
+    bool showAboutDialog = false;
 
     bool showGrid = true;
     bool showSelectionBorder = true;
@@ -276,6 +283,7 @@ private:
     int gifExportScale = 1;
 
     std::string currentProjectPath;
+    std::string lastWindowTitle;
 
     float dpiScale = 1.0f;
 

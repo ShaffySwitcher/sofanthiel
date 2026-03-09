@@ -1,12 +1,66 @@
 name: Build Sofanthiel
 
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.meta.outputs.app_version }}
+      base_version: ${{ steps.meta.outputs.base_version }}
+      build_channel: ${{ steps.meta.outputs.build_channel }}
+      build_label: ${{ steps.meta.outputs.build_label }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      build_date: ${{ steps.meta.outputs.build_date }}
+      repository_url: ${{ steps.meta.outputs.repository_url }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - id: meta
+      shell: bash
+      run: |
+        base_version="$(tr -d '\r\n' < VERSION)"
+        short_sha="${GITHUB_SHA::7}"
+        build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        repository_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+        if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+          build_channel="stable"
+          app_version="${GITHUB_REF_NAME#v}"
+          build_label="${app_version}"
+
+          if [[ "${app_version}" != "${base_version}" ]]; then
+            echo "Tag version ${app_version} does not match VERSION ${base_version}" >&2
+            exit 1
+          fi
+        else
+          build_channel="dev"
+          app_version="${base_version}-dev+${short_sha}"
+          build_label="${base_version}-dev-${short_sha}"
+        fi
+
+        echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+        echo "base_version=${base_version}" >> "$GITHUB_OUTPUT"
+        echo "build_channel=${build_channel}" >> "$GITHUB_OUTPUT"
+        echo "build_label=${build_label}" >> "$GITHUB_OUTPUT"
+        echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+        echo "build_date=${build_date}" >> "$GITHUB_OUTPUT"
+        echo "repository_url=${repository_url}" >> "$GITHUB_OUTPUT"
+
   build-linux:
     runs-on: ubuntu-latest
+    needs: metadata
     env:
       PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
     
@@ -16,7 +70,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake git pkg-config \
+        sudo apt-get install -y build-essential cmake git pkg-config zip \
           libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
           libxinerama-dev libxss-dev libxkbcommon-dev \
           libegl1-mesa-dev libgles2-mesa-dev libdrm-dev \
@@ -156,25 +210,52 @@ jobs:
     - name: Build Sofanthiel
       run: |
         export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-        make -j$(nproc)
+        make -j$(nproc) \
+          APP_VERSION="${{ needs.metadata.outputs.app_version }}" \
+          BUILD_CHANNEL="${{ needs.metadata.outputs.build_channel }}" \
+          GIT_COMMIT="${{ needs.metadata.outputs.short_sha }}" \
+          BUILD_DATE="${{ needs.metadata.outputs.build_date }}" \
+          REPOSITORY_URL="${{ needs.metadata.outputs.repository_url }}"
         ls -lh bin/sofanthiel
         ldd bin/sofanthiel || true
         file bin/sofanthiel
 
     - name: Prepare Linux artifact
       run: |
-        mkdir -p sofanthiel-linux-dist
-        cp bin/sofanthiel sofanthiel-linux-dist/
-        cp -r sofanthiel/assets sofanthiel-linux-dist/
+        package_root="dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}"
+        package_zip="dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip"
+        mkdir -p "$package_root"
+        cp bin/sofanthiel "$package_root/"
+        cp -r sofanthiel/assets "$package_root/"
+        cat > "$package_root/build-metadata.json" <<EOF
+        {
+          "name": "Sofanthiel",
+          "platform": "linux",
+          "version": "${{ needs.metadata.outputs.app_version }}",
+          "channel": "${{ needs.metadata.outputs.build_channel }}",
+          "commit": "${{ needs.metadata.outputs.short_sha }}",
+          "buildDate": "${{ needs.metadata.outputs.build_date }}",
+          "repository": "${{ needs.metadata.outputs.repository_url }}"
+        }
+        EOF
+        (
+          cd dist
+          zip -rq "$(basename "$package_zip")" "$(basename "$package_root")"
+        )
+        sha256sum "$package_zip" > "$package_zip.sha256"
 
     - name: Upload Linux build
+      if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: sofanthiel-linux
-        path: sofanthiel-linux-dist
+        name: sofanthiel-linux-package
+        path: |
+          dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip
+          dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip.sha256
         
   build-windows:
     runs-on: windows-latest
+    needs: metadata
     
     steps:
     - uses: actions/checkout@v4
@@ -336,30 +417,89 @@ jobs:
     - name: Build Sofanthiel
       shell: msys2 {0}
       run: |
-        make -j$(nproc)
+        make -j$(nproc) \
+          APP_VERSION="${{ needs.metadata.outputs.app_version }}" \
+          BUILD_CHANNEL="${{ needs.metadata.outputs.build_channel }}" \
+          GIT_COMMIT="${{ needs.metadata.outputs.short_sha }}" \
+          BUILD_DATE="${{ needs.metadata.outputs.build_date }}" \
+          REPOSITORY_URL="${{ needs.metadata.outputs.repository_url }}"
         ls -lh bin/sofanthiel.exe
 
     - name: Prepare Windows artifact
       shell: msys2 {0}
       run: |
-        mkdir -p sofanthiel-windows-dist
-        cp bin/sofanthiel.exe sofanthiel-windows-dist/
-        cp -r sofanthiel/assets sofanthiel-windows-dist/ || true
+        package_root="dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}"
+        mkdir -p "$package_root"
+        cp bin/sofanthiel.exe "$package_root/"
+        cp -r sofanthiel/assets "$package_root/" || true
         
         # Copy required DLLs
-        cp /mingw64/bin/libgcc_s_seh-1.dll sofanthiel-windows-dist/
-        cp /mingw64/bin/libstdc++-6.dll sofanthiel-windows-dist/
-        cp /mingw64/bin/SDL3.dll sofanthiel-windows-dist/
-        cp /mingw64/bin/SDL3_image.dll sofanthiel-windows-dist/
+        cp /mingw64/bin/libgcc_s_seh-1.dll "$package_root/"
+        cp /mingw64/bin/libstdc++-6.dll "$package_root/"
+        cp /mingw64/bin/SDL3.dll "$package_root/"
+        cp /mingw64/bin/SDL3_image.dll "$package_root/"
         
         # Copy any other potential dependencies
-        ldd bin/sofanthiel.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} sofanthiel-windows-dist/ || true
+        ldd bin/sofanthiel.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} "$package_root/" || true
+
+        cat > "$package_root/build-metadata.json" <<EOF
+        {
+          "name": "Sofanthiel",
+          "platform": "windows",
+          "version": "${{ needs.metadata.outputs.app_version }}",
+          "channel": "${{ needs.metadata.outputs.build_channel }}",
+          "commit": "${{ needs.metadata.outputs.short_sha }}",
+          "buildDate": "${{ needs.metadata.outputs.build_date }}",
+          "repository": "${{ needs.metadata.outputs.repository_url }}"
+        }
+        EOF
         
         echo "Contents of distribution directory:"
-        ls -la sofanthiel-windows-dist/
+        ls -la "$package_root/"
+
+    - name: Archive Windows artifact
+      shell: pwsh
+      run: |
+        $root = "dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}"
+        $zip = "dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip"
+        if (Test-Path $zip) {
+          Remove-Item $zip -Force
+        }
+        Compress-Archive -Path "$root\*" -DestinationPath $zip -Force
+
+        $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+        "$hash *$(Split-Path -Leaf $zip)" | Set-Content -Path "$zip.sha256" -Encoding ascii
 
     - name: Upload Windows build
+      if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: sofanthiel-windows
-        path: sofanthiel-windows-dist
+        name: sofanthiel-windows-package
+        path: |
+          dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip
+          dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - build-linux
+      - build-windows
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download packaged artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts
+
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        prerelease: false
+        files: |
+          release-artifacts/**/*.zip
+          release-artifacts/**/*.sha256

@@ -9,6 +9,14 @@ LDFLAGS :=
 SRC_DIR := sofanthiel
 BUILD_DIR := build
 BIN_DIR := bin
+VERSION_FILE := VERSION
+BASE_VERSION := $(strip $(shell cat $(VERSION_FILE) 2>/dev/null))
+
+APP_VERSION ?= $(if $(BASE_VERSION),$(BASE_VERSION),0.0.0)
+BUILD_CHANNEL ?= local
+GIT_COMMIT ?= local
+BUILD_DATE ?= local
+REPOSITORY_URL ?= https://github.com/ShaffySwitcher/sofanthiel
 
 # Platform-specific settings
 ifeq ($(OS),Windows_NT)
@@ -53,6 +61,13 @@ else
 endif
 
 # Add SDL flags to compiler and linker flags
+APP_DEFINES := -DSOFANTHIEL_APP_VERSION=\"$(APP_VERSION)\" \
+               -DSOFANTHIEL_BUILD_CHANNEL=\"$(BUILD_CHANNEL)\" \
+               -DSOFANTHIEL_GIT_COMMIT=\"$(GIT_COMMIT)\" \
+               -DSOFANTHIEL_BUILD_DATE=\"$(BUILD_DATE)\" \
+               -DSOFANTHIEL_REPOSITORY_URL=\"$(REPOSITORY_URL)\"
+
+CXXFLAGS += $(APP_DEFINES)
 CXXFLAGS += $(SDL3_CFLAGS)
 LDFLAGS += $(SDL3_LDFLAGS)
 

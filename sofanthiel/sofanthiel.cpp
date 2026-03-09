@@ -1,7 +1,9 @@
 ﻿#include "Sofanthiel.h"
+#include "BuildInfo.h"
 #include "IconsFontAwesome6.h"
 #include "InputManager.h"
 #include "UndoRedo.h"
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -33,13 +35,13 @@ int Sofanthiel::run()
 
 bool Sofanthiel::init()
 {
-    if (SDL_Init(SDL_INIT_VIDEO) < 0)
+    if (!SDL_Init(SDL_INIT_VIDEO))
     {
         SDL_Log("Could not initialize SDL: %s", SDL_GetError());
         return false;
     }
 
-    this->window = SDL_CreateWindow("Sofanthiel (v2.20)", 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    this->window = SDL_CreateWindow(BuildInfo::kAppName, 1280, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (this->window == nullptr)
     {
         SDL_Log("Error creating window: %s\n", SDL_GetError());
@@ -52,35 +54,17 @@ bool Sofanthiel::init()
         SDL_DestroySurface(iconSurface);
     }
 
-    int logicalW = 0, pixelW = 0;
-    SDL_GetWindowSize(this->window, &logicalW, nullptr);
-    SDL_GetWindowSizeInPixels(this->window, &pixelW, nullptr);
-    float displayScale = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
-    if (displayScale < 1.0f) displayScale = 1.0f;
-    SDL_Log("Display scale factor: %.2f (logical %d, pixel %d)", displayScale, logicalW, pixelW);
-
 	this->renderer = SDL_CreateRenderer(this->window, NULL);
     if (this->renderer == nullptr) {
         SDL_Log("Error creating renderer: %s\n", SDL_GetError());
 		return false;
     }
-    SDL_SetRenderScale(this->renderer, displayScale, displayScale);
 	SDL_SetRenderVSync(this->renderer, true);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    int windowWidth = 0, windowHeight = 0;
-    SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
-    io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
-    io.DisplayFramebufferScale = ImVec2(displayScale, displayScale);
-
-    this->dpiScale = displayScale;
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    this->applyTheme();
-    style.ScaleAllSizes(displayScale);
 
 	ImGui_ImplSDL3_InitForSDLRenderer(this->window, this->renderer);
     if(!ImGui_ImplSDLRenderer3_Init(this->renderer)) {
@@ -88,32 +72,9 @@ bool Sofanthiel::init()
         return false;
 	}
 
-    float baseFontSize = 13.0f * displayScale;
-    float iconFontSize = baseFontSize * 2.0f / 3.0f;
+    this->applyDisplayScale(this->getCurrentDisplayScale());
 
-    io.Fonts->Clear();
-
-    ImFontConfig defaultConfig;
-    defaultConfig.SizePixels = baseFontSize;
-    defaultConfig.OversampleH = 2;
-    defaultConfig.OversampleV = 1;
-    defaultConfig.PixelSnapH = true;
-    io.Fonts->AddFontDefault(&defaultConfig);
-
-    static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
-    ImFontConfig icons_config;
-    icons_config.MergeMode = true;
-    icons_config.PixelSnapH = true;
-    icons_config.OversampleH = 2;
-    icons_config.OversampleV = 1;
-    icons_config.GlyphMinAdvanceX = iconFontSize;
-    
-    ImFont* iconFont = io.Fonts->AddFontFromFileTTF("assets/" FONT_ICON_FILE_NAME_FAS, iconFontSize, &icons_config, icons_ranges);
-    if (iconFont == nullptr) {
-        SDL_Log("Warning: Could not load FontAwesome icons from assets/" FONT_ICON_FILE_NAME_FAS);
-    }
-
-    io.Fonts->Build();
+    this->updateWindowTitle();
 
     return true;
 }
@@ -245,15 +206,14 @@ void Sofanthiel::update()
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
 
-    int logicalW = 0, logicalH = 0, pixelW = 0, pixelH = 0;
+    int logicalW = 0, logicalH = 0;
     SDL_GetWindowSize(this->window, &logicalW, &logicalH);
-    SDL_GetWindowSizeInPixels(this->window, &pixelW, &pixelH);
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
-    io.DisplayFramebufferScale = ImVec2(
-        (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f,
-        (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 1.0f
-    );
+    io.DisplayFramebufferScale = ImVec2(this->dpiScale, this->dpiScale);
+
+    float currentDisplayScale = this->getCurrentDisplayScale();
+    this->applyDisplayScale(currentDisplayScale);
 
     ImGui::NewFrame();
 
@@ -264,7 +224,18 @@ void Sofanthiel::update()
         isDockingLayoutSetup = true;
     }
 
+    this->updateWindowTitle();
+
     handleMenuBar();
+
+    if (showExitConfirmation) {
+        showAboutDialog = false;
+        if (ImGui::IsPopupOpen("About Sofanthiel")) {
+            ImGui::ClosePopupToLevel(0, true);
+        }
+    } else {
+        handleAboutDialog();
+    }
 
     if (showExitConfirmation) {
         ImGui::OpenPopup("Confirm Exit");
@@ -531,9 +502,11 @@ void Sofanthiel::handleMenuBar()
                 this->editingCelIndex = -1;
 				this->selectedOAMIndices.clear();
                 this->undoManager.clear();
+                this->currentProjectPath.clear();
 
                 this->initializeDefaultPalettes();
                 this->currentPalette = 0;
+                this->updateWindowTitle();
             }
             if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN " Open", "Ctrl+O", nullptr, true)) {
                 nfdresult_t result = NFD_OpenDialog("inv", nullptr, &outPath);
@@ -870,6 +843,18 @@ void Sofanthiel::handleMenuBar()
             }
             ImGui::EndMenu();
         }
+
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("About Sofanthiel")) {
+                showAboutDialog = true;
+            }
+
+            ImGui::EndMenu();
+        }
+
+        std::string buildLabel = BuildInfo::displayVersion();
+        ImGui::SetCursorPosX(calculateRightAlignedPosition(buildLabel.c_str(), 0.0f));
+        ImGui::TextDisabled("%s", buildLabel.c_str());
         ImGui::EndMainMenuBar();
     }
 
@@ -922,6 +907,82 @@ void Sofanthiel::handleMenuBar()
             }
         }
     }
+}
+
+std::string GetFilenameFromPath(const std::string& path)
+{
+    size_t separator = path.find_last_of("\\/");
+    if (separator == std::string::npos) {
+        return path;
+    }
+
+    return path.substr(separator + 1);
+}
+
+std::string Sofanthiel::getProjectDisplayName() const
+{
+    if (this->currentProjectPath.empty()) {
+        return "Untitled";
+    }
+
+    return GetFilenameFromPath(this->currentProjectPath);
+}
+
+std::string Sofanthiel::buildWindowTitle() const
+{
+    std::string title = getProjectDisplayName();
+    title += " - ";
+    title += BuildInfo::kAppName;
+    title += " ";
+    title += BuildInfo::displayVersion();
+    return title;
+}
+
+void Sofanthiel::updateWindowTitle()
+{
+    if (this->window == nullptr) {
+        return;
+    }
+
+    std::string newTitle = buildWindowTitle();
+    if (newTitle == this->lastWindowTitle) {
+        return;
+    }
+
+    SDL_SetWindowTitle(this->window, newTitle.c_str());
+    this->lastWindowTitle = newTitle;
+}
+
+void Sofanthiel::handleAboutDialog()
+{
+    if (showAboutDialog) {
+        ImGui::OpenPopup("About Sofanthiel");
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    }
+
+    bool keepOpen = showAboutDialog;
+    if (ImGui::BeginPopupModal("About Sofanthiel", &keepOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("%s", BuildInfo::kAppName);
+        ImGui::Separator();
+        ImGui::Text("Version: %s", BuildInfo::kVersion);
+        ImGui::Text("Channel: %s", BuildInfo::kBuildChannel);
+        ImGui::Text("Commit: %s", BuildInfo::kGitCommit);
+        ImGui::TextWrapped("Build date: %s", BuildInfo::kBuildDate);
+        ImGui::Spacing();
+        ImGui::TextWrapped("Repository: %s", BuildInfo::kRepositoryUrl);
+        ImGui::TextWrapped("License: GPL-3.0");
+        ImGui::Spacing();
+
+        if (ImGui::Button("Close", getScaledButtonSize(400)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            keepOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    showAboutDialog = keepOpen;
 }
 
 bool Sofanthiel::buildOptimizedSpritesheetState(Tiles& outTiles, std::vector<AnimationCel>& outAnimationCels)
@@ -1286,13 +1347,110 @@ void Sofanthiel::applyTheme() {
     style.TabBarOverlineSize = 2.0f;
 }
 
+float Sofanthiel::getCurrentDisplayScale() const
+{
+    if (this->window == nullptr) {
+        return 1.0f;
+    }
+
+    float displayScale = SDL_GetWindowDisplayScale(this->window);
+    if (std::isfinite(displayScale) && displayScale >= 1.0f) {
+        return displayScale;
+    }
+
+    int logicalW = 0, logicalH = 0;
+    int pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(this->window, &logicalW, &logicalH);
+    SDL_GetWindowSizeInPixels(this->window, &pixelW, &pixelH);
+
+    float scaleX = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 0.0f;
+    float scaleY = (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 0.0f;
+
+    if (scaleX > 0.0f && scaleY > 0.0f) {
+        displayScale = (scaleX + scaleY) * 0.5f;
+    } else if (scaleX > 0.0f) {
+        displayScale = scaleX;
+    } else if (scaleY > 0.0f) {
+        displayScale = scaleY;
+    } else {
+        displayScale = 1.0f;
+    }
+
+    if (!std::isfinite(displayScale) || displayScale < 1.0f) {
+        displayScale = 1.0f;
+    }
+
+    return displayScale;
+}
+
+void Sofanthiel::applyDisplayScale(float displayScale)
+{
+    if (this->window == nullptr || this->renderer == nullptr || ImGui::GetCurrentContext() == nullptr) {
+        return;
+    }
+
+    if (!std::isfinite(displayScale) || displayScale < 1.0f) {
+        displayScale = 1.0f;
+    }
+
+    int windowWidth = 0, windowHeight = 0;
+    SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
+    io.DisplayFramebufferScale = ImVec2(displayScale, displayScale);
+    SDL_SetRenderScale(this->renderer, displayScale, displayScale);
+
+    if (!io.Fonts->Fonts.empty()) {
+        return;
+    }
+
+    SDL_Log("Applying display scale %.2f (previous %.2f)", displayScale, this->dpiScale);
+    this->dpiScale = displayScale;
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style = ImGuiStyle();
+    this->applyTheme();
+    style.ScaleAllSizes(displayScale);
+
+    io.Fonts->Clear();
+
+    float baseFontSize = 13.0f * displayScale;
+    float iconFontSize = baseFontSize * 2.0f / 3.0f;
+
+    ImFontConfig defaultConfig;
+    defaultConfig.SizePixels = baseFontSize;
+    defaultConfig.OversampleH = 2;
+    defaultConfig.OversampleV = 1;
+    defaultConfig.PixelSnapH = true;
+    io.Fonts->AddFontDefault(&defaultConfig);
+
+    static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
+    ImFontConfig icons_config;
+    icons_config.MergeMode = true;
+    icons_config.PixelSnapH = true;
+    icons_config.OversampleH = 2;
+    icons_config.OversampleV = 1;
+    icons_config.GlyphMinAdvanceX = iconFontSize;
+
+    ImFont* iconFont = io.Fonts->AddFontFromFileTTF("assets/" FONT_ICON_FILE_NAME_FAS, iconFontSize, &icons_config, icons_ranges);
+    if (iconFont == nullptr) {
+        SDL_Log("Warning: Could not load FontAwesome icons from assets/" FONT_ICON_FILE_NAME_FAS);
+    }
+
+    io.Fonts->Build();
+
+    ImGui_ImplSDLRenderer3_DestroyDeviceObjects();
+    ImGui_ImplSDLRenderer3_CreateDeviceObjects();
+}
+
 float Sofanthiel::calculateRightAlignedPosition(const char* text, float padding) {
     float textWidth = ImGui::CalcTextSize(text).x;
-    return ImGui::GetWindowWidth() - textWidth - getScaledSize(padding);
+    return ImGui::GetWindowWidth() - textWidth - padding;
 }
 
 float Sofanthiel::calculateRightAlignedPosition(float elementWidth, float padding) {
-    return ImGui::GetWindowWidth() - elementWidth - getScaledSize(padding);
+    return ImGui::GetWindowWidth() - elementWidth - padding;
 }
 
 float Sofanthiel::getScaledSize(float baseSize) {
@@ -1482,6 +1640,7 @@ void Sofanthiel::saveProject(const std::string& path)
 
     file.close();
     this->currentProjectPath = path;
+    this->updateWindowTitle();
     SDL_Log("Saved project to %s", path.c_str());
 }
 
@@ -1625,66 +1784,12 @@ void Sofanthiel::loadProject(const std::string& path)
 
     this->currentProjectPath = path;
     this->recalculateTotalFrames();
+    this->updateWindowTitle();
     SDL_Log("Loaded project from %s (%d tiles, %zu palettes, %zu cels, %zu anims)",
         path.c_str(), tiles.getSize(), palettes.size(),
         animationCels.size(), animations.size());
 }
 
 void Sofanthiel::handleDPIChange() {
-    int logicalW = 0, pixelW = 0;
-    int logicalH = 0, pixelH = 0;
-    SDL_GetWindowSize(this->window, &logicalW, nullptr);
-    SDL_GetWindowSize(this->window, nullptr, &logicalH);
-    SDL_GetWindowSizeInPixels(this->window, &pixelW, nullptr);
-    SDL_GetWindowSizeInPixels(this->window, nullptr, &pixelH);
-
-    float scaleX = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
-    float scaleY = (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 1.0f;
-    float newDisplayScale = (scaleX + scaleY) * 0.5f;
-    if (newDisplayScale < 1.0f) newDisplayScale = 1.0f;
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
-    io.DisplayFramebufferScale = ImVec2(scaleX, scaleY);
-    SDL_SetRenderScale(this->renderer, scaleX, scaleY);
-
-    if (newDisplayScale != this->dpiScale) {
-        SDL_Log("DPI scale changed from %.2f to %.2f", this->dpiScale, newDisplayScale);
-        
-        this->dpiScale = newDisplayScale;
-
-        this->applyTheme();
-        ImGuiStyle& style = ImGui::GetStyle();
-        style.ScaleAllSizes(newDisplayScale);
-
-        io.Fonts->Clear();
-        
-        float baseFontSize = 13.0f * newDisplayScale;
-        float iconFontSize = baseFontSize * 2.0f / 3.0f;
-
-        ImFontConfig defaultConfig;
-        defaultConfig.SizePixels = baseFontSize;
-        defaultConfig.OversampleH = 2;
-        defaultConfig.OversampleV = 1;
-        defaultConfig.PixelSnapH = true;
-        io.Fonts->AddFontDefault(&defaultConfig);
-        
-        static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
-        ImFontConfig icons_config;
-        icons_config.MergeMode = true;
-        icons_config.PixelSnapH = true;
-        icons_config.OversampleH = 2;
-        icons_config.OversampleV = 1;
-        icons_config.GlyphMinAdvanceX = iconFontSize;
-
-        ImFont* iconFont = io.Fonts->AddFontFromFileTTF("assets/" FONT_ICON_FILE_NAME_FAS, iconFontSize, &icons_config, icons_ranges);
-        if (iconFont == nullptr) {
-            SDL_Log("Warning: Could not load FontAwesome icons from assets/" FONT_ICON_FILE_NAME_FAS);
-        }
-        
-        io.Fonts->Build();
-
-        ImGui_ImplSDLRenderer3_DestroyDeviceObjects();
-        ImGui_ImplSDLRenderer3_CreateDeviceObjects();
-    }
+    this->applyDisplayScale(this->getCurrentDisplayScale());
 }
