@@ -223,35 +223,16 @@ jobs:
     - name: Prepare Linux artifact
       run: |
         package_root="dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}"
-        package_zip="dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip"
         mkdir -p "$package_root"
         cp bin/sofanthiel "$package_root/"
         cp -r sofanthiel/assets "$package_root/"
-        cat > "$package_root/build-metadata.json" <<EOF
-        {
-          "name": "Sofanthiel",
-          "platform": "linux",
-          "version": "${{ needs.metadata.outputs.app_version }}",
-          "channel": "${{ needs.metadata.outputs.build_channel }}",
-          "commit": "${{ needs.metadata.outputs.short_sha }}",
-          "buildDate": "${{ needs.metadata.outputs.build_date }}",
-          "repository": "${{ needs.metadata.outputs.repository_url }}"
-        }
-        EOF
-        (
-          cd dist
-          zip -rq "$(basename "$package_zip")" "$(basename "$package_root")"
-        )
-        sha256sum "$package_zip" > "$package_zip.sha256"
 
     - name: Upload Linux build
       if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: sofanthiel-linux-package
-        path: |
-          dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip
-          dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}.zip.sha256
+        name: sofanthiel-linux
+        path: dist/sofanthiel-linux-${{ needs.metadata.outputs.build_label }}
         
   build-windows:
     runs-on: windows-latest
@@ -441,43 +422,16 @@ jobs:
         
         # Copy any other potential dependencies
         ldd bin/sofanthiel.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} "$package_root/" || true
-
-        cat > "$package_root/build-metadata.json" <<EOF
-        {
-          "name": "Sofanthiel",
-          "platform": "windows",
-          "version": "${{ needs.metadata.outputs.app_version }}",
-          "channel": "${{ needs.metadata.outputs.build_channel }}",
-          "commit": "${{ needs.metadata.outputs.short_sha }}",
-          "buildDate": "${{ needs.metadata.outputs.build_date }}",
-          "repository": "${{ needs.metadata.outputs.repository_url }}"
-        }
-        EOF
         
         echo "Contents of distribution directory:"
         ls -la "$package_root/"
-
-    - name: Archive Windows artifact
-      shell: pwsh
-      run: |
-        $root = "dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}"
-        $zip = "dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip"
-        if (Test-Path $zip) {
-          Remove-Item $zip -Force
-        }
-        Compress-Archive -Path "$root\*" -DestinationPath $zip -Force
-
-        $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-        "$hash *$(Split-Path -Leaf $zip)" | Set-Content -Path "$zip.sha256" -Encoding ascii
 
     - name: Upload Windows build
       if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: sofanthiel-windows-package
-        path: |
-          dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip
-          dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}.zip.sha256
+        name: sofanthiel-windows
+        path: dist/sofanthiel-windows-${{ needs.metadata.outputs.build_label }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -495,11 +449,23 @@ jobs:
       with:
         path: release-artifacts
 
+    - name: Create release archives
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zip
+        mkdir -p release-bundles
+        find release-artifacts -mindepth 1 -maxdepth 2 -type d -name 'sofanthiel-*' | while read -r dir; do
+          base_name="$(basename "$dir")"
+          parent_dir="$(dirname "$dir")"
+          (
+            cd "$parent_dir"
+            zip -rq "$GITHUB_WORKSPACE/release-bundles/${base_name}.zip" "$base_name"
+          )
+        done
+
     - name: Publish GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         generate_release_notes: true
         prerelease: false
-        files: |
-          release-artifacts/**/*.zip
-          release-artifacts/**/*.sha256
+        files: release-bundles/*.zip

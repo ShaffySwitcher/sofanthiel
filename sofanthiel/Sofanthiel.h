@@ -67,6 +67,7 @@ private:
     void render();
     void setupDockingLayout();
     void handleDPIChange();
+    float getAutomaticDisplayScale() const;
     float getCurrentDisplayScale() const;
     void applyDisplayScale(float displayScale);
     void handleDroppedFile(const std::string& path);
@@ -286,6 +287,8 @@ private:
     std::string lastWindowTitle;
 
     float dpiScale = 1.0f;
+    float manualDPIScale = 1.0f;
+    bool useManualDPIScale = false;
 
     UndoRedoManager undoManager;
     Palette paletteUndoSnapshot;

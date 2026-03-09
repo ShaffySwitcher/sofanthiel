@@ -203,6 +203,9 @@ void Sofanthiel::handleDroppedFile(const std::string& path)
 
 void Sofanthiel::update()
 {
+    float currentDisplayScale = this->getCurrentDisplayScale();
+    this->applyDisplayScale(currentDisplayScale);
+
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
 
@@ -211,9 +214,6 @@ void Sofanthiel::update()
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
     io.DisplayFramebufferScale = ImVec2(this->dpiScale, this->dpiScale);
-
-    float currentDisplayScale = this->getCurrentDisplayScale();
-    this->applyDisplayScale(currentDisplayScale);
 
     ImGui::NewFrame();
 
@@ -825,6 +825,49 @@ void Sofanthiel::handleMenuBar()
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("DPI Scaling")) {
+                float automaticDisplayScale = this->getAutomaticDisplayScale();
+                ImGui::TextDisabled("Detected: %.2fx", automaticDisplayScale);
+
+                if (ImGui::MenuItem("Automatic", nullptr, !useManualDPIScale)) {
+                    useManualDPIScale = false;
+                }
+
+                ImGui::Separator();
+
+                struct ScalePreset {
+                    float scale;
+                    const char* label;
+                };
+
+                static const ScalePreset scalePresets[] = {
+                    { 1.0f, "100%" },
+                    { 1.25f, "125%" },
+                    { 1.5f, "150%" },
+                    { 1.75f, "175%" },
+                    { 2.0f, "200%" },
+                    { 2.5f, "250%" }
+                };
+
+                for (const ScalePreset& preset : scalePresets) {
+                    bool isSelected = useManualDPIScale;
+                    if (ImGui::MenuItem(preset.label, nullptr, isSelected)) {
+                        useManualDPIScale = true;
+                        manualDPIScale = preset.scale;
+                    }
+                }
+
+                ImGui::Separator();
+
+                float manualScale = manualDPIScale;
+                ImGui::SetNextItemWidth(getScaledSize(140.0f));
+                if (ImGui::SliderFloat("Manual", &manualScale, 1.0, 3.0, "%.2fx")) {
+                    useManualDPIScale = true;
+                    manualDPIScale = manualScale;
+                }
+
+                ImGui::EndMenu();
+            }
             if (ImGui::MenuItem(ICON_FA_IMAGE " Load Background")) {
                 nfdresult_t result = NFD_OpenDialog("png,jpg,bmp", nullptr, &outPath);
 
@@ -1347,14 +1390,14 @@ void Sofanthiel::applyTheme() {
     style.TabBarOverlineSize = 2.0f;
 }
 
-float Sofanthiel::getCurrentDisplayScale() const
+float Sofanthiel::getAutomaticDisplayScale() const
 {
     if (this->window == nullptr) {
-        return 1.0f;
+        return 1.0;
     }
 
     float displayScale = SDL_GetWindowDisplayScale(this->window);
-    if (std::isfinite(displayScale) && displayScale >= 1.0f) {
+    if (std::isfinite(displayScale) && displayScale >= 1.0) {
         return displayScale;
     }
 
@@ -1373,14 +1416,23 @@ float Sofanthiel::getCurrentDisplayScale() const
     } else if (scaleY > 0.0f) {
         displayScale = scaleY;
     } else {
-        displayScale = 1.0f;
+        displayScale = 1.0;
     }
 
-    if (!std::isfinite(displayScale) || displayScale < 1.0f) {
-        displayScale = 1.0f;
+    if (!std::isfinite(displayScale) || displayScale < 1.0) {
+        displayScale = 1.0;
     }
 
     return displayScale;
+}
+
+float Sofanthiel::getCurrentDisplayScale() const
+{
+    if (useManualDPIScale) {
+        return SDL_clamp(manualDPIScale, 1.0, 3.0);
+    }
+
+    return this->getAutomaticDisplayScale();
 }
 
 void Sofanthiel::applyDisplayScale(float displayScale)
@@ -1389,9 +1441,10 @@ void Sofanthiel::applyDisplayScale(float displayScale)
         return;
     }
 
-    if (!std::isfinite(displayScale) || displayScale < 1.0f) {
-        displayScale = 1.0f;
+    if (!std::isfinite(displayScale)) {
+        displayScale = 1.0;
     }
+    displayScale = SDL_clamp(displayScale, 1.0, 3.0);
 
     int windowWidth = 0, windowHeight = 0;
     SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
@@ -1401,7 +1454,7 @@ void Sofanthiel::applyDisplayScale(float displayScale)
     io.DisplayFramebufferScale = ImVec2(displayScale, displayScale);
     SDL_SetRenderScale(this->renderer, displayScale, displayScale);
 
-    if (!io.Fonts->Fonts.empty()) {
+    if (!io.Fonts->Fonts.empty() ) {
         return;
     }
 
@@ -1791,5 +1844,6 @@ void Sofanthiel::loadProject(const std::string& path)
 }
 
 void Sofanthiel::handleDPIChange() {
-    this->applyDisplayScale(this->getCurrentDisplayScale());
+    // Scale changes are applied at the start of the next frame so ImGui font
+    // atlases and renderer device objects are never rebuilt mid-frame.
 }
