@@ -201,6 +201,31 @@ void Sofanthiel::handleDroppedFile(const std::string& path)
     }
 }
 
+ImVec2 getWindowFramebufferScale(SDL_Window* window) {
+    if (window == nullptr) {
+        return ImVec2(1.0f, 1.0f);
+    }
+
+    int logicalW = 0;
+    int logicalH = 0;
+    int pixelW = 0;
+    int pixelH = 0;
+    SDL_GetWindowSize(window, &logicalW, &logicalH);
+    SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
+
+    float scaleX = (logicalW > 0) ? ((float)pixelW / (float)logicalW) : 1.0f;
+    float scaleY = (logicalH > 0) ? ((float)pixelH / (float)logicalH) : 1.0f;
+
+    if (!std::isfinite(scaleX) || scaleX <= 0.0f) {
+        scaleX = 1.0f;
+    }
+    if (!std::isfinite(scaleY) || scaleY <= 0.0f) {
+        scaleY = 1.0f;
+    }
+
+    return ImVec2(scaleX, scaleY);
+}
+
 void Sofanthiel::update()
 {
     float currentDisplayScale = this->getCurrentDisplayScale();
@@ -213,7 +238,7 @@ void Sofanthiel::update()
     SDL_GetWindowSize(this->window, &logicalW, &logicalH);
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
-    io.DisplayFramebufferScale = ImVec2(this->dpiScale, this->dpiScale);
+    io.DisplayFramebufferScale = getWindowFramebufferScale(this->window);
 
     ImGui::NewFrame();
 
@@ -1451,10 +1476,9 @@ void Sofanthiel::applyDisplayScale(float displayScale)
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
-    io.DisplayFramebufferScale = ImVec2(displayScale, displayScale);
-    SDL_SetRenderScale(this->renderer, displayScale, displayScale);
+    io.DisplayFramebufferScale = getWindowFramebufferScale(this->window);
 
-    if (!io.Fonts->Fonts.empty() ) {
+    if (!io.Fonts->Fonts.empty()) {
         return;
     }
 
