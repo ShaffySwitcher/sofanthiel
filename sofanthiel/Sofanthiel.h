@@ -66,7 +66,6 @@ private:
     void update();
     void render();
     void setupDockingLayout();
-    void handleDPIChange();
     float getAutomaticDisplayScale() const;
     float getCurrentDisplayScale() const;
     void applyDisplayScale(float displayScale);

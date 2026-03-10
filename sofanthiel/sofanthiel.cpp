@@ -35,6 +35,9 @@ int Sofanthiel::run()
 
 bool Sofanthiel::init()
 {
+    //SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
+    //SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "1");
+
     if (!SDL_Init(SDL_INIT_VIDEO))
     {
         SDL_Log("Could not initialize SDL: %s", SDL_GetError());
@@ -59,6 +62,8 @@ bool Sofanthiel::init()
         SDL_Log("Error creating renderer: %s\n", SDL_GetError());
 		return false;
     }
+
+    SDL_SetRenderScale(this->renderer, 1.0f, 1.0f);
 	SDL_SetRenderVSync(this->renderer, true);
 
     IMGUI_CHECKVERSION();
@@ -120,10 +125,6 @@ void Sofanthiel::processEvents()
         
         if(event.type == SDL_EVENT_QUIT) {
             showExitConfirmation = true;
-        }
-        else if(event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED ||
-                event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
-            handleDPIChange();
         }
         else if(event.type == SDL_EVENT_DROP_FILE) {
             const char* droppedFile = event.drop.data;
@@ -234,11 +235,11 @@ void Sofanthiel::update()
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
 
-    int logicalW = 0, logicalH = 0;
-    SDL_GetWindowSize(this->window, &logicalW, &logicalH);
+    int pixelW = 0, pixelH = 0;
+    SDL_GetWindowSizeInPixels(this->window, &pixelW, &pixelH);
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
-    io.DisplayFramebufferScale = getWindowFramebufferScale(this->window);
+    io.DisplaySize = ImVec2((float)pixelW, (float)pixelH);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
     ImGui::NewFrame();
 
@@ -875,7 +876,7 @@ void Sofanthiel::handleMenuBar()
                 };
 
                 for (const ScalePreset& preset : scalePresets) {
-                    bool isSelected = useManualDPIScale;
+                    bool isSelected = useManualDPIScale && std::fabs(manualDPIScale - preset.scale) < 0.01f;
                     if (ImGui::MenuItem(preset.label, nullptr, isSelected)) {
                         useManualDPIScale = true;
                         manualDPIScale = preset.scale;
@@ -1472,13 +1473,14 @@ void Sofanthiel::applyDisplayScale(float displayScale)
     displayScale = SDL_clamp(displayScale, 1.0, 3.0);
 
     int windowWidth = 0, windowHeight = 0;
-    SDL_GetWindowSize(this->window, &windowWidth, &windowHeight);
+    SDL_GetWindowSizeInPixels(this->window, &windowWidth, &windowHeight);
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
-    io.DisplayFramebufferScale = getWindowFramebufferScale(this->window);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
-    if (!io.Fonts->Fonts.empty()) {
+    bool scaleChanged = std::fabs(displayScale - this->dpiScale) > 0.01f;
+    if (!io.Fonts->Fonts.empty() && !scaleChanged) {
         return;
     }
 
@@ -1492,8 +1494,15 @@ void Sofanthiel::applyDisplayScale(float displayScale)
 
     io.Fonts->Clear();
 
-    float baseFontSize = 13.0f * displayScale;
-    float iconFontSize = baseFontSize * 2.0f / 3.0f;
+    float baseFontSize = std::round(13.0f * displayScale);
+    float iconFontSize = std::round((baseFontSize * 2.0f) / 3.0f);
+
+    if (baseFontSize < 10.0f) {
+        baseFontSize = 10.0f;
+    }
+    if (iconFontSize < 8.0f) {
+        iconFontSize = 8.0f;
+    }
 
     ImFontConfig defaultConfig;
     defaultConfig.SizePixels = baseFontSize;
@@ -1519,6 +1528,14 @@ void Sofanthiel::applyDisplayScale(float displayScale)
 
     ImGui_ImplSDLRenderer3_DestroyDeviceObjects();
     ImGui_ImplSDLRenderer3_CreateDeviceObjects();
+
+    ImTextureID fontTextureId = io.Fonts->TexRef.GetTexID();
+    if (fontTextureId != ImTextureID_Invalid) {
+        SDL_Texture* fontTexture = reinterpret_cast<SDL_Texture*>((size_t)fontTextureId);
+        if (!SDL_SetTextureScaleMode(fontTexture, SDL_SCALEMODE_NEAREST)) {
+            SDL_Log("Warning: Failed to set ImGui font texture scale mode: %s", SDL_GetError());
+        }
+    }
 }
 
 float Sofanthiel::calculateRightAlignedPosition(const char* text, float padding) {
@@ -1865,9 +1882,4 @@ void Sofanthiel::loadProject(const std::string& path)
     SDL_Log("Loaded project from %s (%d tiles, %zu palettes, %zu cels, %zu anims)",
         path.c_str(), tiles.getSize(), palettes.size(),
         animationCels.size(), animations.size());
-}
-
-void Sofanthiel::handleDPIChange() {
-    // Scale changes are applied at the start of the next frame so ImGui font
-    // atlases and renderer device objects are never rebuilt mid-frame.
 }
