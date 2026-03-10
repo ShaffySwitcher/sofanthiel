@@ -11,3 +11,6 @@ Download nightly builds here:
 ![Animation Preview](/media/enot001.png)
 ![Spritesheet Preview](/media/enot002.png)
 ![Cel Editor](/media/enot003.png)
+
+## Known issue about window scaling
+If you're running wayland make sure to run this program with the follow environment variable: ``SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1``, this will fix the application/window size mismatch.
