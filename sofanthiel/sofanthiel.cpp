@@ -227,6 +227,33 @@ ImVec2 getWindowFramebufferScale(SDL_Window* window) {
     return ImVec2(scaleX, scaleY);
 }
 
+void syncImGuiDisplayMetrics(SDL_Window* window)
+{
+    if (window == nullptr || ImGui::GetCurrentContext() == nullptr) {
+        return;
+    }
+
+    int logicalW = 0;
+    int logicalH = 0;
+    SDL_GetWindowSize(window, &logicalW, &logicalH);
+
+    ImVec2 framebufferScale = getWindowFramebufferScale(window);
+
+    if (logicalW > 0 && logicalH > 0) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.DisplaySize = ImVec2((float)logicalW, (float)logicalH);
+        io.DisplayFramebufferScale = framebufferScale;
+        return;
+    }
+
+    int pixelW = 0;
+    int pixelH = 0;
+    SDL_GetWindowSizeInPixels(window, &pixelW, &pixelH);
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)pixelW, (float)pixelH);
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+}
+
 void Sofanthiel::update()
 {
     float currentDisplayScale = this->getCurrentDisplayScale();
@@ -234,12 +261,7 @@ void Sofanthiel::update()
 
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
-
-    int pixelW = 0, pixelH = 0;
-    SDL_GetWindowSizeInPixels(this->window, &pixelW, &pixelH);
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)pixelW, (float)pixelH);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    syncImGuiDisplayMetrics(this->window);
 
     ImGui::NewFrame();
 
@@ -1472,12 +1494,9 @@ void Sofanthiel::applyDisplayScale(float displayScale)
     }
     displayScale = SDL_clamp(displayScale, 1.0, 3.0);
 
-    int windowWidth = 0, windowHeight = 0;
-    SDL_GetWindowSizeInPixels(this->window, &windowWidth, &windowHeight);
+    syncImGuiDisplayMetrics(this->window);
 
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)windowWidth, (float)windowHeight);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
     bool scaleChanged = std::fabs(displayScale - this->dpiScale) > 0.01f;
     if (!io.Fonts->Fonts.empty() && !scaleChanged) {
