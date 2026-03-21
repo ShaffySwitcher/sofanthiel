@@ -196,10 +196,27 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
     }
     if (!canRemoveRow) ImGui::EndDisabled();
 
+    int cursorX = static_cast<int>(floor(mousePosInWindow.x / view.zoom));
+    int cursorY = static_cast<int>(floor(mousePosInWindow.y / view.zoom));
     ImGui::Text("Cursor: (%.0f, %.0f)  Offset: (%.0f, %.0f)",
-        SDL_clamp(floor(mousePosInWindow.x / view.zoom), 0, contentSize.x),
-        SDL_clamp(floor(mousePosInWindow.y / view.zoom), 0, contentSize.y),
+        static_cast<float>(SDL_clamp(cursorX, 0, static_cast<int>(contentSize.x))),
+        static_cast<float>(SDL_clamp(cursorY, 0, static_cast<int>(contentSize.y))),
         view.offset.x, view.offset.y);
+
+    int tileX = static_cast<int>(floor(mousePosInWindow.x / view.zoom / 8.0f));
+    int tileY = static_cast<int>(floor(mousePosInWindow.y / view.zoom / 8.0f));
+    int rows = (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE;
+    tileX = SDL_clamp(tileX, 0, TILES_PER_LINE - 1);
+    tileY = SDL_clamp(tileY, 0, SDL_max(0, rows - 1));
+
+    int tileIndex = tileY * TILES_PER_LINE + tileX;
+    if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
+        int byteOffset = tileIndex * 32;
+        char tileInfo[128];
+        snprintf(tileInfo, sizeof(tileInfo), " Tile: %d (0x%X)  4bpp offset: 0x%X", tileIndex, tileIndex, byteOffset);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(tileInfo);
+    }
 }
 
 void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
