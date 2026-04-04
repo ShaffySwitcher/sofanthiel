@@ -30,14 +30,24 @@ int Tiles::getSize() const
 	return this->tiles.size();
 }
 
-int Tiles::getWidth() const
+int Tiles::getWidth(int tilesPerRow) const
 {
-	return (this->tiles.size() >= 32 ? 32 : this->tiles.size()) * 8;
+	if (tilesPerRow <= 0) {
+		tilesPerRow = TILES_PER_LINE;
+	}
+
+	const int clampedTilesPerRow = tilesPerRow;
+	const int visibleTiles = SDL_min(static_cast<int>(this->tiles.size()), clampedTilesPerRow);
+	return visibleTiles * 8;
 }
 
-int Tiles::getHeight() const
+int Tiles::getHeight(int tilesPerRow) const
 {
-	return ((this->tiles.size() + 31) / 32) * 8;
+	if (tilesPerRow <= 0) {
+		tilesPerRow = TILES_PER_LINE;
+	}
+
+	return ((static_cast<int>(this->tiles.size()) + tilesPerRow - 1) / tilesPerRow) * 8;
 }
 
 void Tiles::setTile(int index, const TileData& data)

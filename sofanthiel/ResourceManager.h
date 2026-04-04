@@ -51,10 +51,11 @@ public:
 
 	static bool exportSelectionToImage(const std::string& path, Tiles& tiles,
 		const std::vector<Palette>& palettes, int paletteIndex,
-		int tileStartX, int tileStartY, int tileCountX, int tileCountY);
+		int tileStartX, int tileStartY, int tileCountX, int tileCountY,
+		int tilesPerRow = TILES_PER_LINE);
 	static bool importImageAtPosition(const std::string& path, Tiles& tiles,
 		std::vector<Palette>& palettes, int paletteIndex,
-		int tileStartX, int tileStartY);
+		int tileStartX, int tileStartY, int tilesPerRow = TILES_PER_LINE);
 
 	static bool convertImageToSpritesheetAndPalette(const std::string& path,
 		Tiles& outTiles, std::vector<Palette>& outPalettes);

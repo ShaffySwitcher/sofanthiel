@@ -880,11 +880,15 @@ void ResourceManager::saveTilesToImage(const std::string& path, Tiles& tiles, co
 
 bool ResourceManager::exportSelectionToImage(const std::string& path, Tiles& tiles,
     const std::vector<Palette>& palettes, int paletteIndex,
-    int tileStartX, int tileStartY, int tileCountX, int tileCountY)
+    int tileStartX, int tileStartY, int tileCountX, int tileCountY, int tilesPerRow)
 {
     if (tiles.getSize() == 0 || palettes.empty()) {
         SDL_Log("No tiles or palettes available for export");
         return false;
+    }
+
+    if (tilesPerRow <= 0) {
+        tilesPerRow = TILES_PER_LINE;
     }
 
     int pixelWidth = tileCountX * 8;
@@ -904,7 +908,7 @@ bool ResourceManager::exportSelectionToImage(const std::string& path, Tiles& til
 
     for (int ty = 0; ty < tileCountY; ++ty) {
         for (int tx = 0; tx < tileCountX; ++tx) {
-            int tileIndex = (tileStartY + ty) * TILES_PER_LINE + (tileStartX + tx);
+            int tileIndex = (tileStartY + ty) * tilesPerRow + (tileStartX + tx);
             if (tileIndex < 0 || tileIndex >= tiles.getSize()) continue;
 
             TileData tileData = tiles.getTile(tileIndex);
@@ -956,7 +960,7 @@ bool ResourceManager::exportSelectionToImage(const std::string& path, Tiles& til
 
 bool ResourceManager::importImageAtPosition(const std::string& path, Tiles& tiles,
     std::vector<Palette>& palettes, int paletteIndex,
-    int tileStartX, int tileStartY)
+    int tileStartX, int tileStartY, int tilesPerRow)
 {
     SDL_Surface* originalSurface = IMG_Load(path.c_str());
     if (!originalSurface) {
@@ -979,7 +983,11 @@ bool ResourceManager::importImageAtPosition(const std::string& path, Tiles& tile
 
     int safePalette = SDL_clamp(paletteIndex, 0, static_cast<int>(palettes.size()) - 1);
 
-    int maxTileIndex = (tileStartY + tileCountY - 1) * TILES_PER_LINE + (tileStartX + tileCountX - 1);
+    if (tilesPerRow <= 0) {
+        tilesPerRow = TILES_PER_LINE;
+    }
+
+    int maxTileIndex = (tileStartY + tileCountY - 1) * tilesPerRow + (tileStartX + tileCountX - 1);
     tiles.ensureSize(maxTileIndex + 1);
 
     SDL_LockSurface(rgbaSurface);
@@ -990,7 +998,7 @@ bool ResourceManager::importImageAtPosition(const std::string& path, Tiles& tile
 
     for (int ty = 0; ty < tileCountY; ++ty) {
         for (int tx = 0; tx < tileCountX; ++tx) {
-            int tileIndex = (tileStartY + ty) * TILES_PER_LINE + (tileStartX + tx);
+            int tileIndex = (tileStartY + ty) * tilesPerRow + (tileStartX + tx);
 
             TileData tileData;
             memset(&tileData, 0, sizeof(TileData));

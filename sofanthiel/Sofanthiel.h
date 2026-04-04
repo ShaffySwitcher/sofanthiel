@@ -226,6 +226,7 @@ private:
 
     bool usePaletteBGColor = false;
     int currentPalette = 0;
+    int spritesheetTilesPerRow = TILES_PER_LINE;
     ViewManager spritesheetView;
 
     bool ssIsSelecting = false;
@@ -284,6 +285,7 @@ private:
 
     std::string currentProjectPath;
     std::string lastWindowTitle;
+    std::string imguiSettingsPath;
 
     float dpiScale = 1.0f;
     float manualDPIScale = 1.0f;

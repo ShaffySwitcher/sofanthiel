@@ -199,8 +199,8 @@ public:
 
 	int getSize() const;
 
-	int getWidth() const;
-	int getHeight() const;
+	int getWidth(int tilesPerRow = TILES_PER_LINE) const;
+	int getHeight(int tilesPerRow = TILES_PER_LINE) const;
 
 	void clear();
 

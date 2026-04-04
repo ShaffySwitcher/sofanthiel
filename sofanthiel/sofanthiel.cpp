@@ -4,8 +4,43 @@
 #include "InputManager.h"
 #include "UndoRedo.h"
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
+
+namespace {
+
+void* loadFileToHeapBuffer(const char* path, size_t& outSize)
+{
+    outSize = 0;
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        return nullptr;
+    }
+
+    const std::streamsize fileSize = file.tellg();
+    if (fileSize <= 0) {
+        return nullptr;
+    }
+
+    file.seekg(0, std::ios::beg);
+
+    void* buffer = std::malloc(static_cast<size_t>(fileSize));
+    if (buffer == nullptr) {
+        return nullptr;
+    }
+
+    if (!file.read(static_cast<char*>(buffer), fileSize)) {
+        std::free(buffer);
+        return nullptr;
+    }
+
+    outSize = static_cast<size_t>(fileSize);
+    return buffer;
+}
+
+}
 
 Sofanthiel::Sofanthiel()
 {
@@ -70,6 +105,16 @@ bool Sofanthiel::init()
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.IniFilename = nullptr;
+
+    if (char* prefPath = SDL_GetPrefPath("ShaffySwitcher", "Sofanthiel")) {
+        this->imguiSettingsPath = std::string(prefPath) + "imgui.ini";
+        SDL_free(prefPath);
+    }
+
+    if (!this->imguiSettingsPath.empty()) {
+        ImGui::LoadIniSettingsFromDisk(this->imguiSettingsPath.c_str());
+    }
 
 	ImGui_ImplSDL3_InitForSDLRenderer(this->window, this->renderer);
     if(!ImGui_ImplSDLRenderer3_Init(this->renderer)) {
@@ -99,6 +144,9 @@ void Sofanthiel::close()
     }
 
     if(ImGui::GetCurrentContext() != nullptr) {
+        if (!this->imguiSettingsPath.empty()) {
+            ImGui::SaveIniSettingsToDisk(this->imguiSettingsPath.c_str());
+        }
         ImGui_ImplSDLRenderer3_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
@@ -1538,7 +1586,23 @@ void Sofanthiel::applyDisplayScale(float displayScale)
     icons_config.OversampleV = 1;
     icons_config.GlyphMinAdvanceX = iconFontSize;
 
-    ImFont* iconFont = io.Fonts->AddFontFromFileTTF("assets/" FONT_ICON_FILE_NAME_FAS, iconFontSize, &icons_config, icons_ranges);
+    size_t iconFontDataSize = 0;
+    void* iconFontData = loadFileToHeapBuffer("assets/" FONT_ICON_FILE_NAME_FAS, iconFontDataSize);
+    ImFont* iconFont = nullptr;
+    if (iconFontData != nullptr) {
+        iconFont = io.Fonts->AddFontFromMemoryTTF(
+            iconFontData,
+            static_cast<int>(iconFontDataSize),
+            iconFontSize,
+            &icons_config,
+            icons_ranges
+        );
+
+        if (iconFont == nullptr) {
+            std::free(iconFontData);
+        }
+    }
+
     if (iconFont == nullptr) {
         SDL_Log("Warning: Could not load FontAwesome icons from assets/" FONT_ICON_FILE_NAME_FAS);
     }

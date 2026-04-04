@@ -18,7 +18,11 @@ void Sofanthiel::handleSpritesheet()
     ImGui::BeginChild("SpritesheetContent", ImVec2(0, contentHeight), ImGuiChildFlags_None);
 
     ImVec2 contentCenter = calculateContentCenter();
-    ImVec2 baseSize = ImVec2(tiles.getWidth(), tiles.getHeight());
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
+    ImVec2 baseSize = ImVec2(
+        static_cast<float>(tiles.getWidth(tilesPerRow)),
+        static_cast<float>(tiles.getHeight(tilesPerRow))
+    );
     ImVec2 origin = spritesheetView.calculateOrigin(contentCenter, baseSize);
 
     drawSpritesheetContent(origin);
@@ -53,10 +57,11 @@ void Sofanthiel::handleSpritesheet()
 void Sofanthiel::drawSpritesheetContent(const ImVec2& origin)
 {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
 
     ImVec2 scaledSize = ImVec2(
-        tiles.getWidth() * spritesheetView.zoom,
-        tiles.getHeight() * spritesheetView.zoom
+        tiles.getWidth(tilesPerRow) * spritesheetView.zoom,
+        tiles.getHeight(tilesPerRow) * spritesheetView.zoom
     );
 
     drawBackground(drawList, origin, scaledSize, spritesheetView.backgroundColor);
@@ -85,11 +90,12 @@ void Sofanthiel::drawSpritesheetTiles(ImDrawList* drawList, const ImVec2& origin
         return;
     }
 
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
     for (int i = 0; i < tiles.getSize(); i++) {
         float tileSize = 8.0f * spritesheetView.zoom;
 
-        int tileX = i % TILES_PER_LINE;
-        int tileY = i / TILES_PER_LINE;
+        int tileX = i % tilesPerRow;
+        int tileY = i / tilesPerRow;
 
         float xPos = origin.x + tileX * tileSize;
         float yPos = origin.y + tileY * tileSize;
@@ -126,6 +132,8 @@ void Sofanthiel::drawSingleTile(ImDrawList* drawList, float xPos, float yPos, in
 
 void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin)
 {
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
+
     ImGui::ColorEdit3("##SpriteBG", view.backgroundColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Background Color");
 
@@ -146,6 +154,17 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
     ImGui::SameLine();
     ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
     ImGui::SameLine();
+    ImGui::Text("Tiles/Row:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(getScaledSize(80));
+    if (ImGui::InputInt("##SpritesheetTilesPerRow", &spritesheetTilesPerRow, 1, 8)) {
+        spritesheetTilesPerRow = SDL_clamp(spritesheetTilesPerRow, 1, 256);
+        if (ssHasSelection || ssIsSelecting) {
+            ssHasSelection = false;
+            ssIsSelecting = false;
+        }
+    }
+    ImGui::SameLine();
     ImGui::Text("Zoom: %.0f%%", view.zoom * 100);
 
     float resetWidth = ImGui::CalcTextSize(ICON_FA_ROTATE " Reset").x + ImGui::GetStyle().FramePadding.x * 2;
@@ -155,12 +174,12 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
     }
 
     ImGui::Spacing();
-    ImGui::Text("Rows: %d", (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE);
+    ImGui::Text("Rows: %d", (tiles.getSize() + tilesPerRow - 1) / tilesPerRow);
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_PLUS " Row")) {
         Tiles oldTiles = tiles;
         int oldSize = tiles.getSize();
-        tiles.ensureSize(oldSize + TILES_PER_LINE);
+        tiles.ensureSize(oldSize + tilesPerRow);
         Tiles newTiles = tiles;
 
         undoManager.execute(std::make_unique<LambdaAction>(
@@ -180,7 +199,7 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
     if (ImGui::Button(ICON_FA_MINUS " Row")) {
         Tiles oldTiles = tiles;
         int oldSize = tiles.getSize();
-        int newSize = SDL_max(0, oldSize - TILES_PER_LINE);
+        int newSize = SDL_max(0, oldSize - tilesPerRow);
         tiles.resize(newSize);
         Tiles newTiles = tiles;
 
@@ -205,11 +224,11 @@ void Sofanthiel::drawSpritesheetInfoPanel(ViewManager& view, ImVec2 mousePosInWi
 
     int tileX = static_cast<int>(floor(mousePosInWindow.x / view.zoom / 8.0f));
     int tileY = static_cast<int>(floor(mousePosInWindow.y / view.zoom / 8.0f));
-    int rows = (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE;
-    tileX = SDL_clamp(tileX, 0, TILES_PER_LINE - 1);
+    int rows = (tiles.getSize() + tilesPerRow - 1) / tilesPerRow;
+    tileX = SDL_clamp(tileX, 0, tilesPerRow - 1);
     tileY = SDL_clamp(tileY, 0, SDL_max(0, rows - 1));
 
-    int tileIndex = tileY * TILES_PER_LINE + tileX;
+    int tileIndex = tileY * tilesPerRow + tileX;
     if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
         int byteOffset = tileIndex * 32;
         char tileInfo[128];
@@ -224,12 +243,13 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
     if (tiles.getSize() <= 0) return;
 
     float tileSize = 8.0f * spritesheetView.zoom;
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
     ImVec2 mousePos = ImGui::GetIO().MousePos;
 
     if (ssImportActive) {
         int tileX = static_cast<int>(floor((mousePos.x - origin.x) / tileSize));
         int tileY = static_cast<int>(floor((mousePos.y - origin.y) / tileSize));
-        tileX = SDL_clamp(tileX, 0, TILES_PER_LINE - 1);
+        tileX = SDL_clamp(tileX, 0, tilesPerRow - 1);
         tileY = SDL_clamp(tileY, 0, 255);
         ssImportTilePos = ImVec2(static_cast<float>(tileX), static_cast<float>(tileY));
 
@@ -237,7 +257,8 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
             ResourceManager::importImageAtPosition(
                 ssImportImagePath, tiles, palettes, currentPalette,
                 static_cast<int>(ssImportTilePos.x),
-                static_cast<int>(ssImportTilePos.y));
+                static_cast<int>(ssImportTilePos.y),
+                tilesPerRow);
 
             if (ssImportPreviewTex) {
                 SDL_DestroyTexture(ssImportPreviewTex);
@@ -264,8 +285,8 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
         int tileX = static_cast<int>(floor((mousePos.x - origin.x) / tileSize));
         int tileY = static_cast<int>(floor((mousePos.y - origin.y) / tileSize));
 
-        int maxTileY = (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE;
-        if (tileX >= 0 && tileX < TILES_PER_LINE && tileY >= 0 && tileY < maxTileY) {
+        int maxTileY = (tiles.getSize() + tilesPerRow - 1) / tilesPerRow;
+        if (tileX >= 0 && tileX < tilesPerRow && tileY >= 0 && tileY < maxTileY) {
             ssIsSelecting = true;
             ssSelStart = ImVec2(static_cast<float>(tileX), static_cast<float>(tileY));
             ssSelEnd = ssSelStart;
@@ -281,8 +302,8 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
         int tileX = static_cast<int>(floor((mousePos.x - origin.x) / tileSize));
         int tileY = static_cast<int>(floor((mousePos.y - origin.y) / tileSize));
 
-        int maxTileY = (tiles.getSize() + TILES_PER_LINE - 1) / TILES_PER_LINE;
-        tileX = SDL_clamp(tileX, 0, TILES_PER_LINE - 1);
+        int maxTileY = (tiles.getSize() + tilesPerRow - 1) / tilesPerRow;
+        tileX = SDL_clamp(tileX, 0, tilesPerRow - 1);
         tileY = SDL_clamp(tileY, 0, maxTileY - 1);
         ssSelEnd = ImVec2(static_cast<float>(tileX), static_cast<float>(tileY));
     }
@@ -313,7 +334,7 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
         TileData emptyTile = {};
         for (int y = ssSelTileY0; y <= ssSelTileY1; ++y) {
             for (int x = ssSelTileX0; x <= ssSelTileX1; ++x) {
-                int tileIndex = y * TILES_PER_LINE + x;
+                int tileIndex = y * tilesPerRow + x;
                 if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
                     tiles.setTile(tileIndex, emptyTile);
                 }
@@ -344,7 +365,7 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
             for (int x = 0; x < copyWidth; ++x) {
                 int srcX = ssSelTileX0 + x;
                 int srcY = ssSelTileY0 + y;
-                int tileIndex = srcY * TILES_PER_LINE + srcX;
+                int tileIndex = srcY * tilesPerRow + srcX;
 
                 if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
                     ssTileClipboard.push_back(tiles.getTile(tileIndex));
@@ -365,9 +386,9 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
         int destX = ssSelTileX0;
         int destY = ssSelTileY0;
 
-        int maxDestX = SDL_min(TILES_PER_LINE - 1, destX + ssTileClipboardWidth - 1);
+        int maxDestX = SDL_min(tilesPerRow - 1, destX + ssTileClipboardWidth - 1);
         int maxDestY = destY + ssTileClipboardHeight - 1;
-        int requiredMaxIndex = maxDestY * TILES_PER_LINE + maxDestX;
+        int requiredMaxIndex = maxDestY * tilesPerRow + maxDestX;
         if (requiredMaxIndex >= 0) {
             tiles.ensureSize(requiredMaxIndex + 1);
         }
@@ -376,11 +397,11 @@ void Sofanthiel::handleSpritesheetSelection(const ImVec2& origin)
             for (int x = 0; x < ssTileClipboardWidth; ++x) {
                 int dstX = destX + x;
                 int dstY = destY + y;
-                if (dstX < 0 || dstX >= TILES_PER_LINE || dstY < 0) {
+                if (dstX < 0 || dstX >= tilesPerRow || dstY < 0) {
                     continue;
                 }
 
-                int dstIndex = dstY * TILES_PER_LINE + dstX;
+                int dstIndex = dstY * tilesPerRow + dstX;
                 int srcIndex = y * ssTileClipboardWidth + x;
                 if (dstIndex >= 0 && dstIndex < tiles.getSize() &&
                     srcIndex >= 0 && srcIndex < static_cast<int>(ssTileClipboard.size())) {
@@ -474,8 +495,9 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
 {
     static ImVec2 rightClickStart;
     static bool rightClickTracking = false;
+    const int tilesPerRow = SDL_max(1, spritesheetTilesPerRow);
 
-    auto copySelectionToClipboard = [this]() {
+    auto copySelectionToClipboard = [this, tilesPerRow]() {
         int copyWidth = ssSelTileX1 - ssSelTileX0 + 1;
         int copyHeight = ssSelTileY1 - ssSelTileY0 + 1;
 
@@ -487,7 +509,7 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
             for (int x = 0; x < copyWidth; ++x) {
                 int srcX = ssSelTileX0 + x;
                 int srcY = ssSelTileY0 + y;
-                int tileIndex = srcY * TILES_PER_LINE + srcX;
+                int tileIndex = srcY * tilesPerRow + srcX;
 
                 if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
                     ssTileClipboard.push_back(tiles.getTile(tileIndex));
@@ -502,13 +524,13 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
         ssTileClipboardHeight = copyHeight;
     };
 
-    auto clearSelectionTiles = [this]() {
+    auto clearSelectionTiles = [this, tilesPerRow]() {
         Tiles oldTiles = tiles;
 
         TileData emptyTile = {};
         for (int y = ssSelTileY0; y <= ssSelTileY1; ++y) {
             for (int x = ssSelTileX0; x <= ssSelTileX1; ++x) {
-                int tileIndex = y * TILES_PER_LINE + x;
+                int tileIndex = y * tilesPerRow + x;
                 if (tileIndex >= 0 && tileIndex < tiles.getSize()) {
                     tiles.setTile(tileIndex, emptyTile);
                 }
@@ -527,15 +549,15 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
         ));
     };
 
-    auto pasteClipboardToSelection = [this]() {
+    auto pasteClipboardToSelection = [this, tilesPerRow]() {
         Tiles oldTiles = tiles;
 
         int destX = ssSelTileX0;
         int destY = ssSelTileY0;
 
-        int maxDestX = SDL_min(TILES_PER_LINE - 1, destX + ssTileClipboardWidth - 1);
+        int maxDestX = SDL_min(tilesPerRow - 1, destX + ssTileClipboardWidth - 1);
         int maxDestY = destY + ssTileClipboardHeight - 1;
-        int requiredMaxIndex = maxDestY * TILES_PER_LINE + maxDestX;
+        int requiredMaxIndex = maxDestY * tilesPerRow + maxDestX;
         if (requiredMaxIndex >= 0) {
             tiles.ensureSize(requiredMaxIndex + 1);
         }
@@ -544,11 +566,11 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
             for (int x = 0; x < ssTileClipboardWidth; ++x) {
                 int dstX = destX + x;
                 int dstY = destY + y;
-                if (dstX < 0 || dstX >= TILES_PER_LINE || dstY < 0) {
+                if (dstX < 0 || dstX >= tilesPerRow || dstY < 0) {
                     continue;
                 }
 
-                int dstIndex = dstY * TILES_PER_LINE + dstX;
+                int dstIndex = dstY * tilesPerRow + dstX;
                 int srcIndex = y * ssTileClipboardWidth + x;
                 if (dstIndex >= 0 && dstIndex < tiles.getSize() &&
                     srcIndex >= 0 && srcIndex < static_cast<int>(ssTileClipboard.size())) {
@@ -599,7 +621,8 @@ void Sofanthiel::handleSpritesheetContextMenu(const ImVec2& origin)
                     outPath, tiles, palettes, currentPalette,
                     ssSelTileX0, ssSelTileY0,
                     ssSelTileX1 - ssSelTileX0 + 1,
-                    ssSelTileY1 - ssSelTileY0 + 1);
+                    ssSelTileY1 - ssSelTileY0 + 1,
+                    tilesPerRow);
                 free(outPath);
             }
         }
