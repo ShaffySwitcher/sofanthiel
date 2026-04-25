@@ -1,6 +1,6 @@
 # Sofanthiel
 
-Rhythm Tengoku animation editor for Windows/Linux using [decomp-friendly](https://github.com/arthurtilly/rhythmtengoku) formats.
+*Rhythm Tengoku*/*WarioWare, Inc.* animation editor for Windows/Linux using [decomp-](https://github.com/arthurtilly/rhythmtengoku)[friendly](https://github.com/shaffyswitcher/wariowareinc) formats.
 
 Download nightly builds here:
 

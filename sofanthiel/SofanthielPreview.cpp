@@ -58,6 +58,30 @@ std::vector<int> buildHitTestOrder(const AnimationCel& cel)
     return indices;
 }
 
+const AnimationCel* findAnimationCelByName(const std::vector<AnimationCel>& cels, const std::string& celName)
+{
+    for (const auto& cel : cels) {
+        if (cel.name == celName) {
+            return &cel;
+        }
+    }
+
+    return nullptr;
+}
+
+const AnimationCel* findAnimationCelForFrame(const Animation& anim, const std::vector<AnimationCel>& cels, int frame)
+{
+    int frameCounter = 0;
+    for (const auto& entry : anim.entries) {
+        if (frame >= frameCounter && frame < frameCounter + entry.duration) {
+            return findAnimationCelByName(cels, entry.celName);
+        }
+        frameCounter += entry.duration;
+    }
+
+    return nullptr;
+}
+
 }
 
 void Sofanthiel::handlePreview()
@@ -225,36 +249,65 @@ void Sofanthiel::drawCurrentAnimationFrame(ImDrawList* drawList, ImVec2 origin, 
         return;
     }
 
-    const Animation& anim = animations[currentAnimation];
+    drawAnimationFramePreview(
+        drawList,
+        origin,
+        zoom,
+        animations[currentAnimation],
+        animationCels,
+        currentFrame,
+        previewAnimationOffset);
+}
 
-    int frameCounter = 0;
-    std::string currentCelName;
-
-    for (const auto& entry : anim.entries) {
-        if (currentFrame >= frameCounter && currentFrame < frameCounter + entry.duration) {
-            currentCelName = entry.celName;
-            break;
-        }
-        frameCounter += entry.duration;
+void Sofanthiel::drawAnimationFramePreview(ImDrawList* drawList, ImVec2 origin, float zoom,
+    const Animation& anim, const std::vector<AnimationCel>& cels,
+    int frame, ImVec2 animationOffset)
+{
+    if (anim.entries.empty() || cels.empty()) {
+        return;
     }
 
-    const AnimationCel* cel = nullptr;
-    for (const auto& c : animationCels) {
-        if (c.name == currentCelName) {
-            cel = &c;
-            break;
-        }
+    const AnimationCel* cel = findAnimationCelForFrame(anim, cels, frame);
+    if (cel == nullptr) {
+        return;
     }
 
-    if (cel == nullptr) return;
-
-    float offsetX = previewSize.x / 2.0f + previewAnimationOffset.x;
-    float offsetY = previewSize.y / 2.0f + previewAnimationOffset.y;
+    float offsetX = previewSize.x / 2.0f + animationOffset.x;
+    float offsetY = previewSize.y / 2.0f + animationOffset.y;
+    bool canRenderSpritePixels = tiles.getSize() > 0 && !palettes.empty();
 
     const std::vector<int> renderOrder = buildRenderOrder(*cel);
     for (int index : renderOrder) {
         const TengokuOAM& oam = cel->oams[static_cast<size_t>(index)];
-        renderOAM(drawList, origin, zoom, oam, offsetX, offsetY, 1.0f);
+
+        if (canRenderSpritePixels) {
+            renderOAM(drawList, origin, zoom, oam, offsetX, offsetY, 1.0f);
+            continue;
+        }
+
+        if (!shouldRenderOAM(oam)) {
+            continue;
+        }
+
+        int width = 0;
+        int height = 0;
+        getOAMDimensions(oam.objShape, oam.objSize, width, height);
+
+        ImVec2 min(
+            origin.x + (oam.xPosition + offsetX) * zoom,
+            origin.y + (oam.yPosition + offsetY) * zoom);
+        ImVec2 max(
+            min.x + width * zoom,
+            min.y + height * zoom);
+
+        ImU32 boxColor = IM_COL32(
+            80 + (index * 53) % 160,
+            120 + (index * 37) % 100,
+            180 + (index * 29) % 70,
+            static_cast<unsigned char>(getRenderAlpha(oam, 1.0f) * 255.0f));
+
+        drawList->AddRectFilled(min, max, IM_COL32(255, 255, 255, 18));
+        drawList->AddRect(min, max, boxColor, 0.0f, 0, 2.0f);
     }
 }
 

@@ -1,6 +1,300 @@
 #include "Sofanthiel.h"
 #include "IconsFontAwesome6.h"
 #include "InputManager.h"
+#include <cfloat>
+#include <cmath>
+
+ImU32 getTimelineEntryColor(int entryIdx, bool isSelected)
+{
+    if (isSelected) {
+        return IM_COL32(100, 150, 250, 180);
+    }
+
+    return IM_COL32(
+        50 + (entryIdx * 70) % 150,
+        100 + (entryIdx * 50) % 150,
+        150 + (entryIdx * 40) % 100,
+        180);
+}
+
+ImRect getTimelineEntryRect(const ImVec2& winPos, float syncScroll, float celStartX, float celWidth, float entryHeight)
+{
+    return ImRect(
+        ImVec2(winPos.x + celStartX - syncScroll, winPos.y),
+        ImVec2(winPos.x + celStartX - syncScroll + celWidth, winPos.y + entryHeight));
+}
+
+float getTimelineHandleWidth(float celWidth, float entryHeight)
+{
+    if (celWidth <= 0.0f) {
+        return 0.0f;
+    }
+
+    float preferredWidth = entryHeight * 0.48f;
+    float maxWidth = ImMax(7.0f, celWidth * 0.38f);
+    return ImClamp(preferredWidth, 7.0f, maxWidth);
+}
+
+ImRect getTimelineHandleRect(const ImRect& entryRect, float entryHeight)
+{
+    float handleWidth = getTimelineHandleWidth(entryRect.GetWidth(), entryHeight);
+    float inset = ImMin(4.0f, entryRect.GetWidth() * 0.2f);
+    float minX = ImMin(entryRect.Min.x + inset, entryRect.Max.x);
+    float maxX = ImMin(entryRect.Max.x, minX + handleWidth);
+    return ImRect(ImVec2(minX, entryRect.Min.y), ImVec2(maxX, entryRect.Max.y));
+}
+
+void drawTimelineEntryBody(ImDrawList* drawList, const ImRect& entryRect, ImU32 fillColor, ImU32 borderColor)
+{
+    drawList->AddRectFilled(entryRect.Min, entryRect.Max, fillColor);
+    drawList->AddRect(entryRect.Min, entryRect.Max, borderColor);
+}
+
+void drawTimelineHandle(ImDrawList* drawList, const ImRect& handleRect, bool isHovered, bool isActive)
+{
+    ImU32 handleFill = isActive ? IM_COL32(255, 220, 120, 110) :
+        isHovered ? IM_COL32(255, 255, 255, 55) :
+        IM_COL32(0, 0, 0, 45);
+    ImU32 lineColor = isActive ? IM_COL32(255, 245, 220, 255) :
+        isHovered ? IM_COL32(255, 255, 255, 230) :
+        IM_COL32(255, 255, 255, 160);
+
+    ImRect gripRect(
+        ImVec2(handleRect.Min.x + 1.0f, handleRect.Min.y + 2.0f),
+        ImVec2(handleRect.Max.x - 1.0f, handleRect.Max.y - 2.0f));
+    if (gripRect.GetWidth() <= 0.0f || gripRect.GetHeight() <= 0.0f) {
+        gripRect = handleRect;
+    }
+
+    drawList->AddRectFilled(gripRect.Min, gripRect.Max, handleFill, 2.0f);
+
+    float centerX = (gripRect.Min.x + gripRect.Max.x) * 0.5f;
+    float top = gripRect.Min.y + 4.0f;
+    float bottom = gripRect.Max.y - 4.0f;
+    float spacing = ImClamp(gripRect.GetWidth() * 0.17f, 2.0f, 2.6f);
+    for (int i = -1; i <= 1; ++i) {
+        float x = centerX + i * spacing;
+        drawList->AddLine(ImVec2(x, top), ImVec2(x, bottom), lineColor, 1.0f);
+    }
+}
+
+int getTimelineEntryStartFrame(const Animation& anim, int entryIdx)
+{
+    int frameStart = 0;
+    int clampedIdx = SDL_clamp(entryIdx, 0, static_cast<int>(anim.entries.size()));
+    for (int i = 0; i < clampedIdx; ++i) {
+        frameStart += anim.entries[i].duration;
+    }
+    return frameStart;
+}
+
+std::vector<int> getNormalizedTimelineEntryIndices(const std::vector<int>& indices, int entryCount)
+{
+    std::vector<int> normalized;
+    normalized.reserve(indices.size());
+    for (int idx : indices) {
+        if (idx >= 0 && idx < entryCount) {
+            normalized.push_back(idx);
+        }
+    }
+
+    std::sort(normalized.begin(), normalized.end());
+    normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+    return normalized;
+}
+
+bool isTimelineEntryIndexInList(const std::vector<int>& indices, int entryIdx)
+{
+    return std::binary_search(indices.begin(), indices.end(), entryIdx);
+}
+
+std::vector<int> getTimelineDraggedEntryIndices(const std::vector<int>& selectedEntryIndices,
+    int draggedEntryIdx, int entryCount)
+{
+    std::vector<int> draggedEntryIndices = getNormalizedTimelineEntryIndices(selectedEntryIndices, entryCount);
+    if (!isTimelineEntryIndexInList(draggedEntryIndices, draggedEntryIdx)) {
+        draggedEntryIndices.clear();
+        if (draggedEntryIdx >= 0 && draggedEntryIdx < entryCount) {
+            draggedEntryIndices.push_back(draggedEntryIdx);
+        }
+    }
+
+    return draggedEntryIndices;
+}
+
+float getTimelineDraggedWidth(const Animation& anim, const std::vector<int>& draggedEntryIndices, float frameWidth)
+{
+    float draggedWidth = 0.0f;
+    for (int entryIdx : draggedEntryIndices) {
+        draggedWidth += anim.entries[entryIdx].duration * frameWidth;
+    }
+    return draggedWidth;
+}
+
+float getTimelineDraggedBlockOffset(const Animation& anim, const std::vector<int>& draggedEntryIndices,
+    int draggedEntryIdx, float frameWidth)
+{
+    float offset = 0.0f;
+    for (int entryIdx : draggedEntryIndices) {
+        if (entryIdx == draggedEntryIdx) {
+            break;
+        }
+        offset += anim.entries[entryIdx].duration * frameWidth;
+    }
+    return offset;
+}
+
+int getTimelinePreviewInsertIdx(const std::vector<int>& draggedEntryIndices, int rawInsertIdx, int entryCount)
+{
+    if (draggedEntryIndices.empty()) {
+        return -1;
+    }
+
+    int insertIdx = SDL_clamp(rawInsertIdx, 0, entryCount);
+    for (int draggedEntryIdx : draggedEntryIndices) {
+        if (draggedEntryIdx < insertIdx) {
+            insertIdx--;
+        }
+    }
+
+    return SDL_clamp(insertIdx, 0, entryCount - static_cast<int>(draggedEntryIndices.size()));
+}
+
+std::vector<int> buildTimelinePreviewOrder(int entryCount, const std::vector<int>& draggedEntryIndices,
+    int previewInsertIdx)
+{
+    std::vector<int> previewOrder;
+    previewOrder.reserve(entryCount);
+
+    int clampedInsertIdx = SDL_clamp(
+        previewInsertIdx,
+        0,
+        entryCount - static_cast<int>(draggedEntryIndices.size()));
+
+    bool insertedDraggedEntries = false;
+    int remainingEntryIdx = 0;
+    for (int entryIdx = 0; entryIdx < entryCount; ++entryIdx) {
+        if (isTimelineEntryIndexInList(draggedEntryIndices, entryIdx)) {
+            continue;
+        }
+
+        if (!insertedDraggedEntries && remainingEntryIdx == clampedInsertIdx) {
+            previewOrder.insert(previewOrder.end(), draggedEntryIndices.begin(), draggedEntryIndices.end());
+            insertedDraggedEntries = true;
+        }
+
+        previewOrder.push_back(entryIdx);
+        ++remainingEntryIdx;
+    }
+
+    if (!insertedDraggedEntries) {
+        previewOrder.insert(previewOrder.end(), draggedEntryIndices.begin(), draggedEntryIndices.end());
+    }
+
+    return previewOrder;
+}
+
+bool isTimelinePreviewOrderOriginal(const std::vector<int>& previewOrder)
+{
+    for (int i = 0; i < static_cast<int>(previewOrder.size()); ++i) {
+        if (previewOrder[i] != i) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int getTimelineRawInsertIdx(const Animation& anim, float probeFramePos)
+{
+    std::vector<std::pair<int, int>> framePositions;
+    framePositions.reserve(anim.entries.size() + 1);
+
+    int framePos = 0;
+    framePositions.push_back(std::make_pair(framePos, 0));
+    for (int i = 0; i < static_cast<int>(anim.entries.size()); ++i) {
+        framePos += anim.entries[i].duration;
+        framePositions.push_back(std::make_pair(framePos, i + 1));
+    }
+
+    int bestIdx = 0;
+    float bestDist = FLT_MAX;
+    for (const auto& pos : framePositions) {
+        float dist = std::abs(probeFramePos - static_cast<float>(pos.first));
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = pos.second;
+        }
+    }
+
+    return bestIdx;
+}
+
+int getTimelineVisibleFrameStart(float syncScroll, float frameWidth)
+{
+    if (frameWidth <= 0.0f) {
+        return 0;
+    }
+
+    return ImMax(0, static_cast<int>(std::floor(syncScroll / frameWidth)) - 1);
+}
+
+int getTimelineVisibleFrameEnd(float syncScroll, float frameWidth, float windowWidth, int totalFrames)
+{
+    if (frameWidth <= 0.0f) {
+        return 0;
+    }
+
+    int lastVisible = static_cast<int>(std::ceil((syncScroll + windowWidth) / frameWidth)) + 1;
+    return ImClamp(lastVisible, 0, totalFrames);
+}
+
+int getTimelineLabelStep(float frameWidth)
+{
+    const float minSpacing = 56.0f;
+    int step = 1;
+
+    while (step * frameWidth < minSpacing) {
+        if (step == 1) {
+            step = 2;
+        }
+        else if (step == 2) {
+            step = 5;
+        }
+        else {
+            step *= 2;
+        }
+    }
+
+    return step;
+}
+
+void drawTimelineFrameGrid(ImDrawList* drawList, const ImVec2& winPos, float syncScroll,
+    float frameWidth, float height, int totalFrames)
+{
+    if (frameWidth <= 0.0f || height <= 0.0f || totalFrames <= 0) {
+        return;
+    }
+
+    float windowWidth = ImGui::GetWindowWidth();
+    int firstFrame = getTimelineVisibleFrameStart(syncScroll, frameWidth);
+    int lastFrame = getTimelineVisibleFrameEnd(syncScroll, frameWidth, windowWidth, totalFrames);
+
+    for (int frame = firstFrame; frame <= lastFrame; ++frame) {
+        float x = winPos.x + frame * frameWidth - syncScroll;
+        bool majorLine = (frame % 10) == 0;
+        bool midLine = (frame % 5) == 0;
+        ImU32 lineColor = majorLine ? IM_COL32(255, 255, 255, 42) :
+            midLine ? IM_COL32(255, 255, 255, 24) :
+            IM_COL32(255, 255, 255, 12);
+
+        drawList->AddLine(
+            ImVec2(x, winPos.y),
+            ImVec2(x, winPos.y + height),
+            lineColor,
+            majorLine ? 1.35f : 1.0f);
+    }
+}
 
 void Sofanthiel::handleTimeline()
 {
@@ -21,10 +315,17 @@ void Sofanthiel::handleTimeline()
 
     recalculateTotalFrames();
 
+    float baseFrameWidth = getScaledSize(15.0f);
+    float previousFrameWidth = baseFrameWidth * timelineHorizontalZoom;
     drawTimelineControls();
+    timelineHorizontalZoom = ImClamp(timelineHorizontalZoom, 0.6f, 6.0f);
+    float frameWidth = baseFrameWidth * timelineHorizontalZoom;
+    if (previousFrameWidth > 0.0f && std::abs(previousFrameWidth - frameWidth) > 0.01f) {
+        syncScroll = ImMax(0.0f, (syncScroll / previousFrameWidth) * frameWidth);
+    }
+
     ImGui::Separator();
 
-    float frameWidth = getScaledSize(15.0f);
     float timelineStartX = getScaledSize(60.0f);
     float requiredWidth = timelineStartX + frameWidth * totalFrames;
 
@@ -85,6 +386,30 @@ void Sofanthiel::drawTimelineControls()
     ImGui::SliderFloat("FPS", &frameRate, 1.0f, 120.0f, "%.0f");
     ImGui::SameLine();
     ImGui::Checkbox("Loop", &loopAnimation);
+
+    ImGui::Text("Frame Width");
+    ImGui::SameLine();
+
+    float zoomStep = 0.15f;
+    if (ImGui::SmallButton("-")) {
+        timelineHorizontalZoom = ImMax(0.6f, timelineHorizontalZoom - zoomStep);
+    }
+    ImGui::SameLine();
+
+    ImGui::SetNextItemWidth(getScaledSize(150.0f));
+    ImGui::SliderFloat("##TimelineHorizontalZoom", &timelineHorizontalZoom, 0.6f, 6.0f, "%.2fx");
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton("+")) {
+        timelineHorizontalZoom = ImMin(6.0f, timelineHorizontalZoom + zoomStep);
+    }
+    ImGui::SameLine();
+
+    if (ImGui::Button("1:1")) {
+        timelineHorizontalZoom = 1.0f;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Ctrl+Wheel in timeline");
 }
 
 void Sofanthiel::drawTimelineHeaders(float timelineStartX, float& syncScroll, float frameWidth)
@@ -100,13 +425,20 @@ void Sofanthiel::drawTimelineHeaders(float timelineStartX, float& syncScroll, fl
     ImGui::BeginChild("TimelineHeader", ImVec2(0, headerHeight), false,
         ImGuiWindowFlags_NoScrollbar);
 
-    for (int i = 0; i < totalFrames; i++) {
-        if (i % 5 == 0) {
-            float xPos = i * frameWidth - syncScroll;
-            ImGui::SetCursorPosX(xPos);
-            ImGui::Text("%d", i);
-            ImGui::SameLine();
-        }
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImVec2 winPos = ImGui::GetWindowPos();
+    drawTimelineFrameGrid(drawList, winPos, syncScroll, frameWidth, headerHeight, totalFrames);
+
+    int labelStep = getTimelineLabelStep(frameWidth);
+    int firstFrame = getTimelineVisibleFrameStart(syncScroll, frameWidth);
+    int lastFrame = getTimelineVisibleFrameEnd(syncScroll, frameWidth, ImGui::GetWindowWidth(), totalFrames);
+    int firstLabel = (firstFrame / labelStep) * labelStep;
+
+    for (int i = firstLabel; i <= lastFrame; i += labelStep) {
+        float xPos = i * frameWidth - syncScroll + getScaledSize(3.0f);
+        ImGui::SetCursorPosX(xPos);
+        ImGui::Text("%d", i);
+        ImGui::SameLine();
     }
     ImGui::EndChild();
 
@@ -130,10 +462,14 @@ void Sofanthiel::drawTimelineContent(Animation& anim, float timelineStartX, floa
     ImGui::Dummy(ImVec2(1, 1));
     ImGui::SetCursorPos(ImVec2(0, 0));
 
-    handleTimelineScrolling(syncScroll);
+    handleTimelineScrolling(syncScroll, frameWidth);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImVec2 winPos = ImGui::GetWindowPos();
+
+    if (showGrid) {
+        drawTimelineFrameGrid(drawList, winPos, syncScroll, frameWidth, ImGui::GetWindowHeight(), totalFrames);
+    }
 
     drawTimelineMarker(drawList, winPos, syncScroll, frameWidth);
 
@@ -186,7 +522,7 @@ void Sofanthiel::drawTimelineContent(Animation& anim, float timelineStartX, floa
             }
 
             if (InputManager::isPressed(InputManager::Paste) && !clipboardEntries.empty()) {
-                int insertPos = timelineSelectedEntryIndices.empty() ? anim.entries.size() :
+                int insertPos = timelineSelectedEntryIndices.empty() ? static_cast<int>(anim.entries.size()) :
                     *std::max_element(timelineSelectedEntryIndices.begin(), timelineSelectedEntryIndices.end()) + 1;
 
                 auto oldEntries = anim.entries;
@@ -195,7 +531,7 @@ void Sofanthiel::drawTimelineContent(Animation& anim, float timelineStartX, floa
                     clipboardEntries.begin(), clipboardEntries.end());
 
                 timelineSelectedEntryIndices.clear();
-                for (size_t i = 0; i < clipboardEntries.size(); i++) {
+                for (int i = 0; i < static_cast<int>(clipboardEntries.size()); ++i) {
                     timelineSelectedEntryIndices.push_back(insertPos + i);
                 }
 
@@ -219,39 +555,17 @@ void Sofanthiel::drawTimelineContent(Animation& anim, float timelineStartX, floa
             }
         }
 
+        handleTimelineResizing(anim, timelineResizeState, syncScroll, frameWidth);
+        if (!timelineResizeState.isResizing) {
+            handleTimelineDragging(anim, winPos, syncScroll, frameWidth, timelineDragState, timelineEntryHeight);
+        }
+
         if (!timelineDragState.isDragging) {
             drawTimelineEntries(anim, drawList, winPos, syncScroll, frameWidth, timelineResizeState, timelineSelectedEntryIndices, timelineEntryHeight, clipboardEntries);
         }
         else {
-            int frameIndex = 0;
-            for (int entryIdx = 0; entryIdx < anim.entries.size(); entryIdx++) {
-                if (entryIdx == timelineDragState.draggedEntryIdx) {
-                    frameIndex += anim.entries[entryIdx].duration;
-                    continue;
-                }
-
-                AnimationEntry& entry = anim.entries[entryIdx];
-
-                float celStartX = frameIndex * frameWidth;
-                float celWidth = entry.duration * frameWidth;
-
-                if (celStartX - syncScroll + celWidth < 0 || celStartX - syncScroll > ImGui::GetWindowWidth()) {
-                    frameIndex += entry.duration;
-                    continue;
-                }
-
-                bool isSelected = std::find(timelineSelectedEntryIndices.begin(), timelineSelectedEntryIndices.end(), entryIdx) != timelineSelectedEntryIndices.end();
-
-                drawTimelineEntryBackground(drawList, winPos, syncScroll, entryIdx, celStartX, celWidth, isSelected, timelineSelectedEntryIndices, timelineHoveredEntryIdx, clipboardEntries, timelineEntryHeight);
-                drawTimelineEntryLabel(drawList, winPos, syncScroll, entry.celName, celStartX, celWidth, timelineEntryHeight);
-                drawTimelineFrameCels(drawList, winPos, syncScroll, frameIndex, entry.duration, frameWidth, timelineEntryHeight);
-
-                frameIndex += entry.duration;
-            }
+            drawTimelineDragPreview(anim, drawList, winPos, syncScroll, frameWidth, timelineDragState, timelineSelectedEntryIndices, timelineEntryHeight);
         }
-
-        handleTimelineResizing(anim, timelineResizeState, syncScroll, frameWidth);
-        if (!timelineResizeState.isResizing) { handleTimelineDragging(anim, drawList, winPos, syncScroll, frameWidth, timelineDragState, timelineEntryHeight); }
 
         handleTimelineAutoScroll(syncScroll, frameWidth);
 
@@ -319,10 +633,27 @@ void Sofanthiel::drawTimelineContent(Animation& anim, float timelineStartX, floa
     ImGui::EndChild();
 }
 
-void Sofanthiel::handleTimelineScrolling(float& syncScroll)
+void Sofanthiel::handleTimelineScrolling(float& syncScroll, float& frameWidth)
 {
     ImGuiIO& io = ImGui::GetIO();
-    if (ImGui::IsWindowHovered() && io.MouseWheel != 0 && !io.KeyShift && !io.KeyCtrl) {
+    if (ImGui::IsWindowHovered() && io.KeyCtrl && io.MouseWheel != 0.0f) {
+        float oldFrameWidth = frameWidth;
+        float oldZoom = timelineHorizontalZoom;
+        timelineHorizontalZoom = ImClamp(timelineHorizontalZoom + io.MouseWheel * 0.10f, 0.6f, 6.0f);
+
+        if (std::abs(oldZoom - timelineHorizontalZoom) > 0.001f && oldFrameWidth > 0.0f) {
+            frameWidth = getScaledSize(15.0f) * timelineHorizontalZoom;
+
+            float mouseLocalX = io.MousePos.x - ImGui::GetWindowPos().x;
+            float anchoredFrame = (mouseLocalX + syncScroll) / oldFrameWidth;
+            float newScroll = anchoredFrame * frameWidth - mouseLocalX;
+            syncScroll = ImClamp(newScroll, 0.0f, ImGui::GetScrollMaxX());
+            ImGui::SetScrollX(syncScroll);
+        }
+
+        io.MouseWheel = 0.0f;
+    }
+    else if (ImGui::IsWindowHovered() && io.MouseWheel != 0 && !io.KeyShift && !io.KeyCtrl) {
         ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseWheel * getScaledSize(30.0f));
         io.MouseWheel = 0;
     }
@@ -373,30 +704,20 @@ void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2&
     bool isSelected, std::vector<int>& selectedEntryIndices, int& hoveredEntryIdx,
     std::vector<AnimationEntry>& clipboardEntries, float entryHeight)
 {
-    ImU32 entryColor;
+    ImRect entryRect = getTimelineEntryRect(winPos, syncScroll, celStartX, celWidth, entryHeight);
+    ImRect handleRect = getTimelineHandleRect(entryRect, entryHeight);
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    bool isHandleHovered = handleRect.Contains(mousePos);
+    bool isHandleActive = isTimelineEntryIndexInList(timelineDragState.draggedEntryIndices, entryIdx);
 
-    if (isSelected) {
-        entryColor = IM_COL32(100, 150, 250, 180);
-    }
-    else {
-        entryColor = IM_COL32(50 + (entryIdx * 70) % 150, 100 + (entryIdx * 50) % 150, 150 + (entryIdx * 40) % 100, 180);
-    }
+    drawTimelineEntryBody(
+        drawList,
+        entryRect,
+        getTimelineEntryColor(entryIdx, isSelected),
+        isSelected ? IM_COL32(255, 255, 255, 200) : IM_COL32(200, 200, 200, 100));
+    drawTimelineHandle(drawList, handleRect, isHandleHovered, isHandleActive);
 
-    drawList->AddRectFilled(
-        ImVec2(winPos.x + celStartX - syncScroll, winPos.y),
-        ImVec2(winPos.x + celStartX - syncScroll + celWidth, winPos.y + entryHeight),
-        entryColor
-    );
-
-    drawList->AddRect(
-        ImVec2(winPos.x + celStartX - syncScroll, winPos.y),
-        ImVec2(winPos.x + celStartX - syncScroll + celWidth, winPos.y + entryHeight),
-        isSelected ? IM_COL32(255, 255, 255, 200) : IM_COL32(200, 200, 200, 100)
-    );
-
-    ImVec2 celMin(winPos.x + celStartX - syncScroll, winPos.y);
-    ImVec2 celMax(winPos.x + celStartX - syncScroll + celWidth, winPos.y + entryHeight);
-    ImGui::SetCursorScreenPos(celMin);
+    ImGui::SetCursorScreenPos(entryRect.Min);
     char entryButtonId[32];
     snprintf(entryButtonId, sizeof(entryButtonId), "##entry_dnd_%d", entryIdx);
     ImGui::InvisibleButton(entryButtonId, ImVec2(celWidth, entryHeight));
@@ -404,30 +725,47 @@ void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2&
         hoveredEntryIdx = entryIdx;
     }
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-        if (ImGui::GetIO().KeyCtrl) {
-            auto it = std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), entryIdx);
-            if (it != selectedEntryIndices.end()) {
-                selectedEntryIndices.erase(it);
+        bool preserveSelectionForHandleDrag = isHandleHovered &&
+            isSelected &&
+            !ImGui::GetIO().KeyCtrl &&
+            !ImGui::GetIO().KeyShift;
+
+        if (!preserveSelectionForHandleDrag) {
+            if (ImGui::GetIO().KeyCtrl) {
+                auto it = std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), entryIdx);
+                if (it != selectedEntryIndices.end()) {
+                    selectedEntryIndices.erase(it);
+                }
+                else {
+                    selectedEntryIndices.push_back(entryIdx);
+                }
+            }
+            else if (ImGui::GetIO().KeyShift && !selectedEntryIndices.empty()) {
+                int lastSelected = selectedEntryIndices.back();
+                int start = std::min(lastSelected, entryIdx);
+                int end = std::max(lastSelected, entryIdx);
+
+                for (int i = start; i <= end; i++) {
+                    if (std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), i) == selectedEntryIndices.end()) {
+                        selectedEntryIndices.push_back(i);
+                    }
+                }
             }
             else {
+                selectedEntryIndices.clear();
                 selectedEntryIndices.push_back(entryIdx);
             }
         }
-        else if (ImGui::GetIO().KeyShift && !selectedEntryIndices.empty()) {
-            int lastSelected = selectedEntryIndices.back();
-            int start = std::min(lastSelected, entryIdx);
-            int end = std::max(lastSelected, entryIdx);
+    }
 
-            for (int i = start; i <= end; i++) {
-                if (std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), i) == selectedEntryIndices.end()) {
-                    selectedEntryIndices.push_back(i);
-                }
-            }
-        }
-        else {
-            selectedEntryIndices.clear();
-            selectedEntryIndices.push_back(entryIdx);
-        }
+    if (isHandleHovered && !timelineDragState.isDragging && !timelineResizeState.isResizing) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(
+            isSelected && selectedEntryIndices.size() > 1
+            ? "Drag the grip to move the selected entries"
+            : "Drag the grip to move this entry");
+        ImGui::EndTooltip();
     }
 
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -468,7 +806,7 @@ void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2&
                     clipboardEntries.begin(), clipboardEntries.end());
 
                 selectedEntryIndices.clear();
-                for (size_t i = 0; i < clipboardEntries.size(); i++) {
+                for (int i = 0; i < static_cast<int>(clipboardEntries.size()); ++i) {
                     selectedEntryIndices.push_back(insertPos + i);
                 }
 
@@ -562,9 +900,14 @@ void Sofanthiel::drawTimelineEntryLabel(ImDrawList* drawList, const ImVec2& winP
 {
     std::string displayName = celName;
     bool isNameTruncated = false;
-    int wantedSize = celWidth - 8;
-	int currentSize = ImGui::CalcTextSize(displayName.c_str()).x;
-    if (currentSize - 8 > celWidth) {
+    float leftPadding = getTimelineHandleWidth(celWidth, entryHeight) + 8.0f;
+    float wantedSize = celWidth - leftPadding - 4.0f;
+	float currentSize = ImGui::CalcTextSize(displayName.c_str()).x;
+    if (wantedSize <= 0.0f) {
+        return;
+    }
+
+    if (currentSize > wantedSize) {
         while(currentSize > wantedSize && displayName.length() > 2) {
             displayName = displayName.substr(0, displayName.length() - 1);
             currentSize = ImGui::CalcTextSize(displayName.c_str()).x;
@@ -573,7 +916,14 @@ void Sofanthiel::drawTimelineEntryLabel(ImDrawList* drawList, const ImVec2& winP
     }
 
     ImVec2 textSize = ImGui::CalcTextSize(displayName.c_str());
-    float textX = winPos.x + celStartX - syncScroll + (celWidth - textSize.x) * 0.5f;
+    float labelMinX = winPos.x + celStartX - syncScroll + leftPadding;
+    float labelMaxX = winPos.x + celStartX - syncScroll + celWidth - 4.0f;
+    float labelWidth = labelMaxX - labelMinX;
+    if (labelWidth <= 0.0f) {
+        return;
+    }
+
+    float textX = labelMinX + (labelWidth - textSize.x) * 0.5f;
     float textY = winPos.y + (entryHeight - textSize.y) * 0.5f;
 
     drawList->AddText(
@@ -685,33 +1035,195 @@ void Sofanthiel::handleTimelineAutoScroll(float syncScroll, float frameWidth)
     }
 }
 
-void Sofanthiel::handleTimelineDragging(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
-    float syncScroll, float frameWidth, TimelineDragState& dragState, float entryHeight)
+void Sofanthiel::drawTimelineDragPreview(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
+    float syncScroll, float frameWidth, const TimelineDragState& dragState,
+    const std::vector<int>& selectedEntryIndices, float entryHeight)
 {
-    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    if (dragState.draggedEntryIdx < 0 || dragState.draggedEntryIdx >= static_cast<int>(anim.entries.size())) {
+        return;
+    }
+
+    std::vector<int> draggedEntryIndices = dragState.draggedEntryIndices.empty()
+        ? getTimelineDraggedEntryIndices(selectedEntryIndices, dragState.draggedEntryIdx, static_cast<int>(anim.entries.size()))
+        : dragState.draggedEntryIndices;
+    if (draggedEntryIndices.empty()) {
+        return;
+    }
+
+    const int previewInsertIdx = getTimelinePreviewInsertIdx(
+        draggedEntryIndices,
+        dragState.targetInsertIdx,
+        static_cast<int>(anim.entries.size()));
+    if (previewInsertIdx < 0) {
+        return;
+    }
+
+    std::vector<int> previewOrder = buildTimelinePreviewOrder(
+        static_cast<int>(anim.entries.size()),
+        draggedEntryIndices,
+        previewInsertIdx);
+    float draggedWidth = getTimelineDraggedWidth(anim, draggedEntryIndices, frameWidth);
+
+    int frameIndex = 0;
+    int previewFrameStart = 0;
+    bool hasPreviewFrameStart = false;
+    for (int idx : previewOrder) {
+        const AnimationEntry& entry = anim.entries[idx];
+        bool isDraggedEntry = isTimelineEntryIndexInList(draggedEntryIndices, idx);
+        if (isDraggedEntry) {
+            if (!hasPreviewFrameStart) {
+                previewFrameStart = frameIndex;
+                hasPreviewFrameStart = true;
+            }
+            frameIndex += entry.duration;
+            continue;
+        }
+
+        float celStartX = frameIndex * frameWidth;
+        float celWidth = entry.duration * frameWidth;
+        bool isVisible = !(celStartX - syncScroll + celWidth < 0 || celStartX - syncScroll > ImGui::GetWindowWidth());
+        if (isVisible) {
+            bool isSelected = std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), idx) != selectedEntryIndices.end();
+            ImRect entryRect = getTimelineEntryRect(winPos, syncScroll, celStartX, celWidth, entryHeight);
+            drawTimelineEntryBody(
+                drawList,
+                entryRect,
+                getTimelineEntryColor(idx, isSelected),
+                isSelected ? IM_COL32(255, 255, 255, 200) : IM_COL32(200, 200, 200, 100));
+            drawTimelineHandle(drawList, getTimelineHandleRect(entryRect, entryHeight), false, false);
+            drawTimelineEntryLabel(drawList, winPos, syncScroll, entry.celName, celStartX, celWidth, entryHeight);
+        }
+
+        frameIndex += entry.duration;
+    }
+
+    if (!hasPreviewFrameStart) {
+        previewFrameStart = frameIndex;
+    }
+
+    bool isNoOp = isTimelinePreviewOrderOriginal(previewOrder);
+    float targetStartX = previewFrameStart * frameWidth;
+
+    ImRect targetRect = getTimelineEntryRect(winPos, syncScroll, targetStartX, draggedWidth, entryHeight);
+
+    for (int idx : draggedEntryIndices) {
+        float sourceStartX = getTimelineEntryStartFrame(anim, idx) * frameWidth;
+        float sourceWidth = anim.entries[idx].duration * frameWidth;
+        ImRect sourceRect = getTimelineEntryRect(winPos, syncScroll, sourceStartX, sourceWidth, entryHeight);
+        drawList->AddRectFilled(sourceRect.Min, sourceRect.Max, IM_COL32(255, 255, 255, 18));
+        drawList->AddRect(sourceRect.Min, sourceRect.Max, IM_COL32(255, 170, 90, 140), 0.0f, 0, 1.5f);
+    }
+
+    ImU32 targetFill = isNoOp ? IM_COL32(140, 190, 255, 55) : IM_COL32(255, 222, 120, 70);
+    ImU32 targetBorder = isNoOp ? IM_COL32(170, 210, 255, 210) : IM_COL32(255, 232, 140, 255);
+    drawList->AddRectFilled(targetRect.Min, targetRect.Max, targetFill);
+    drawList->AddRect(targetRect.Min, targetRect.Max, targetBorder, 0.0f, 0, 2.0f);
+
+    float sourceStartX = getTimelineEntryStartFrame(anim, draggedEntryIndices.front()) * frameWidth;
+    float sourceEndX = sourceStartX;
+    for (int idx : draggedEntryIndices) {
+        sourceEndX += anim.entries[idx].duration * frameWidth;
+    }
+    ImRect sourceBounds = getTimelineEntryRect(
+        winPos,
+        syncScroll,
+        sourceStartX,
+        sourceEndX - sourceStartX,
+        entryHeight);
+
+    float sourceCenterX = (sourceBounds.Min.x + sourceBounds.Max.x) * 0.5f;
+    float targetCenterX = (targetRect.Min.x + targetRect.Max.x) * 0.5f;
+    if (std::abs(sourceCenterX - targetCenterX) > 1.0f) {
+        float controlYOffset = getScaledSize(18.0f);
+        drawList->AddBezierCubic(
+            ImVec2(sourceCenterX, sourceBounds.Min.y - 3.0f),
+            ImVec2(sourceCenterX, sourceBounds.Min.y - controlYOffset),
+            ImVec2(targetCenterX, targetRect.Min.y - controlYOffset),
+            ImVec2(targetCenterX, targetRect.Min.y - 3.0f),
+            IM_COL32(255, 210, 120, 180),
+            2.0f);
+    }
+
+    const char* indicatorLabel = isNoOp ? "Original position" : "Drop here";
+    ImVec2 indicatorSize = ImGui::CalcTextSize(indicatorLabel);
+    float indicatorX = targetRect.Min.x + (targetRect.GetWidth() - indicatorSize.x) * 0.5f;
+    drawList->AddText(
+        ImVec2(indicatorX, targetRect.Min.y - indicatorSize.y - 3.0f),
+        targetBorder,
+        indicatorLabel);
+
+    float draggedX = dragState.dragCurrentPosX - dragState.offsetFromDraggedBlockLeft;
+    ImRect draggedRect(ImVec2(draggedX, winPos.y), ImVec2(draggedX + draggedWidth, winPos.y + entryHeight));
+
+    drawList->AddRectFilled(
+        ImVec2(draggedRect.Min.x + 4.0f, draggedRect.Min.y + 4.0f),
+        ImVec2(draggedRect.Max.x + 4.0f, draggedRect.Max.y + 4.0f),
+        IM_COL32(0, 0, 0, 70),
+        0.0f);
+
+    float draggedEntryX = draggedX;
+    for (int idx : draggedEntryIndices) {
+        const AnimationEntry& entry = anim.entries[idx];
+        float entryWidth = entry.duration * frameWidth;
+        ImRect entryRect(
+            ImVec2(draggedEntryX, winPos.y),
+            ImVec2(draggedEntryX + entryWidth, winPos.y + entryHeight));
+
+        drawTimelineEntryBody(
+            drawList,
+            entryRect,
+            IM_COL32(100, 150, 250, 220),
+            IM_COL32(220, 235, 255, 255));
+        drawTimelineHandle(drawList, getTimelineHandleRect(entryRect, entryHeight), false, true);
+        drawTimelineEntryLabel(
+            drawList,
+            winPos,
+            syncScroll,
+            entry.celName,
+            draggedEntryX - winPos.x + syncScroll,
+            entryWidth,
+            entryHeight);
+
+        draggedEntryX += entryWidth;
+    }
+}
+
+void Sofanthiel::handleTimelineDragging(Animation& anim, const ImVec2& winPos,
+    float& syncScroll, float frameWidth, TimelineDragState& dragState, float entryHeight)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    ImVec2 mousePos = io.MousePos;
 
     if (!dragState.isDragging) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            dragState.draggedEntryIdx = -1;
+            dragState.draggedEntryIndices.clear();
+            dragState.targetInsertIdx = -1;
+            dragState.offsetFromDraggedBlockLeft = 0.0f;
+
             if (mousePos.y >= winPos.y && mousePos.y <= winPos.y + entryHeight) {
                 int frameIndex = 0;
-                for (int entryIdx = 0; entryIdx < anim.entries.size(); entryIdx++) {
+                for (int entryIdx = 0; entryIdx < static_cast<int>(anim.entries.size()); entryIdx++) {
                     const AnimationEntry& entry = anim.entries[entryIdx];
                     float celStartX = frameIndex * frameWidth;
                     float celWidth = entry.duration * frameWidth;
+                    ImRect entryRect = getTimelineEntryRect(winPos, syncScroll, celStartX, celWidth, entryHeight);
+                    ImRect handleRect = getTimelineHandleRect(entryRect, entryHeight);
 
-                    float celLeft = winPos.x + celStartX - syncScroll;
-                    float celRight = celLeft + celWidth;
+                    if (handleRect.Contains(mousePos)) {
+                        std::vector<int> draggedEntryIndices = getTimelineDraggedEntryIndices(
+                            timelineSelectedEntryIndices,
+                            entryIdx,
+                            static_cast<int>(anim.entries.size()));
 
-                    if (mousePos.x >= celLeft && mousePos.x < celRight) {
                         dragState.draggedEntryIdx = entryIdx;
+                        dragState.draggedEntryIndices = draggedEntryIndices;
                         dragState.dragStartPosX = mousePos.x;
                         dragState.dragCurrentPosX = mousePos.x;
-                        dragState.offsetFromEntryLeft = mousePos.x - celLeft;
+                        dragState.offsetFromDraggedBlockLeft =
+                            mousePos.x - entryRect.Min.x +
+                            getTimelineDraggedBlockOffset(anim, draggedEntryIndices, entryIdx, frameWidth);
                         dragState.targetInsertIdx = entryIdx;
-
-                        float clickOffsetInCel = mousePos.x - celLeft;
-                        int frameOffset = static_cast<int>(clickOffsetInCel / frameWidth);
-                        currentFrame = frameIndex + std::min(frameOffset, entry.duration - 1);
                         break;
                     }
 
@@ -720,147 +1232,125 @@ void Sofanthiel::handleTimelineDragging(Animation& anim, ImDrawList* drawList, c
             }
         }
         else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && dragState.draggedEntryIdx >= 0) {
-            float dragDelta = std::abs(ImGui::GetMousePos().x - dragState.dragStartPosX);
+            float dragDelta = std::abs(io.MousePos.x - dragState.dragStartPosX);
             if (dragDelta > 5.0f) {
                 dragState.isDragging = true;
+                dragState.dragCurrentPosX = mousePos.x;
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
             }
         }
         else if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             dragState.draggedEntryIdx = -1;
+            dragState.draggedEntryIndices.clear();
+            dragState.targetInsertIdx = -1;
+            dragState.offsetFromDraggedBlockLeft = 0.0f;
         }
+        return;
     }
-    else {
-        dragState.dragCurrentPosX = mousePos.x;
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
-        float mouseFramePos = (mousePos.x - winPos.x + syncScroll) / frameWidth;
-        std::vector<std::pair<int, int>> framePositions;
-        int framePos = 0;
 
-        framePositions.push_back(std::make_pair(framePos, 0));
-        for (int i = 0; i < anim.entries.size(); i++) {
-            framePos += anim.entries[i].duration;
-            framePositions.push_back(std::make_pair(framePos, i + 1));
-        }
+    if (dragState.draggedEntryIdx < 0 || dragState.draggedEntryIdx >= static_cast<int>(anim.entries.size())) {
+        dragState.isDragging = false;
+        dragState.draggedEntryIdx = -1;
+        dragState.draggedEntryIndices.clear();
+        dragState.targetInsertIdx = -1;
+        dragState.offsetFromDraggedBlockLeft = 0.0f;
+        return;
+    }
 
-        int bestIdx = 0;
-        float bestDist = FLT_MAX;
-        for (const auto& pos : framePositions) {
-            float dist = std::abs(mouseFramePos - pos.first);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestIdx = pos.second;
-            }
-        }
+    std::vector<int> draggedEntryIndices = dragState.draggedEntryIndices.empty()
+        ? getTimelineDraggedEntryIndices(timelineSelectedEntryIndices, dragState.draggedEntryIdx, static_cast<int>(anim.entries.size()))
+        : dragState.draggedEntryIndices;
+    if (draggedEntryIndices.empty()) {
+        dragState.isDragging = false;
+        dragState.draggedEntryIdx = -1;
+        dragState.draggedEntryIndices.clear();
+        dragState.targetInsertIdx = -1;
+        dragState.offsetFromDraggedBlockLeft = 0.0f;
+        return;
+    }
 
-        dragState.targetInsertIdx = bestIdx;
+    dragState.dragCurrentPosX = mousePos.x;
+    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
 
-        if (dragState.targetInsertIdx == dragState.draggedEntryIdx) {
-            dragState.targetInsertIdx = -1;
-        }
+    float edgePadding = getScaledSize(56.0f);
+    float scrollStep = getScaledSize(18.0f);
+    float visibleLeft = winPos.x;
+    float visibleRight = winPos.x + ImGui::GetWindowWidth();
+    float nextScroll = syncScroll;
 
-        if (dragState.draggedEntryIdx >= 0 && dragState.draggedEntryIdx < anim.entries.size()) {
-            const AnimationEntry& entry = anim.entries[dragState.draggedEntryIdx];
-            float celWidth = entry.duration * frameWidth;
+    if (mousePos.x > visibleRight - edgePadding) {
+        nextScroll = ImMin(ImGui::GetScrollMaxX(), syncScroll + scrollStep);
+    }
+    else if (mousePos.x < visibleLeft + edgePadding) {
+        nextScroll = ImMax(0.0f, syncScroll - scrollStep);
+    }
 
-            float draggedX = mousePos.x - dragState.offsetFromEntryLeft;
+    if (nextScroll != syncScroll) {
+        ImGui::SetScrollX(nextScroll);
+        syncScroll = nextScroll;
+    }
 
-            ImU32 draggedColor = IM_COL32(100, 150, 250, 200);
-            drawList->AddRectFilled(
-                ImVec2(draggedX, winPos.y),
-                ImVec2(draggedX + celWidth, winPos.y + entryHeight),
-                draggedColor
-            );
+    float draggedWidth = getTimelineDraggedWidth(anim, draggedEntryIndices, frameWidth);
+    float draggedLeft = dragState.dragCurrentPosX - dragState.offsetFromDraggedBlockLeft;
+    float probeFramePos = (draggedLeft - winPos.x + syncScroll + draggedWidth * 0.5f) / frameWidth;
+    dragState.targetInsertIdx = getTimelineRawInsertIdx(anim, probeFramePos);
 
-            drawList->AddRect(
-                ImVec2(draggedX, winPos.y),
-                ImVec2(draggedX + celWidth, winPos.y + entryHeight),
-                IM_COL32(200, 220, 255, 230),
-                0.0f, 0, 2.0f
-            );
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        int finalInsertIdx = getTimelinePreviewInsertIdx(
+            draggedEntryIndices,
+            dragState.targetInsertIdx,
+            static_cast<int>(anim.entries.size()));
+        std::vector<int> previewOrder = buildTimelinePreviewOrder(
+            static_cast<int>(anim.entries.size()),
+            draggedEntryIndices,
+            finalInsertIdx);
 
-            if (celWidth > getScaledSize(30.0f)) {
-                std::string displayName = entry.celName;
-                if (displayName.length() > 8 && celWidth < getScaledSize(80.0f))
-                    displayName = displayName.substr(0, 6) + "..";
+        if (finalInsertIdx >= 0 && !isTimelinePreviewOrderOriginal(previewOrder)) {
+            auto oldEntries = anim.entries;
+            std::vector<AnimationEntry> movedEntries;
+            std::vector<AnimationEntry> remainingEntries;
+            movedEntries.reserve(draggedEntryIndices.size());
+            remainingEntries.reserve(anim.entries.size() - draggedEntryIndices.size());
 
-                ImVec2 textSize = ImGui::CalcTextSize(displayName.c_str());
-                float textX = draggedX + (celWidth - textSize.x) * 0.5f;
-                float textY = winPos.y + (entryHeight - textSize.y) * 0.5f;
-
-                drawList->AddText(
-                    ImVec2(textX + 1, textY + 1),
-                    IM_COL32(0, 0, 0, 200),
-                    displayName.c_str()
-                );
-
-                drawList->AddText(
-                    ImVec2(textX, textY),
-                    IM_COL32(255, 255, 255, 255),
-                    displayName.c_str()
-                );
-            }
-
-            if (dragState.targetInsertIdx >= 0) {
-                int insertFramePos = 0;
-                for (int i = 0; i < dragState.targetInsertIdx && i < anim.entries.size(); i++) {
-                    insertFramePos += anim.entries[i].duration;
+            for (int idx = 0; idx < static_cast<int>(anim.entries.size()); ++idx) {
+                if (isTimelineEntryIndexInList(draggedEntryIndices, idx)) {
+                    movedEntries.push_back(anim.entries[idx]);
                 }
-
-                float insertX = winPos.x + insertFramePos * frameWidth - syncScroll;
-
-                drawList->AddLine(
-                    ImVec2(insertX, winPos.y - 2),
-                    ImVec2(insertX, winPos.y + entryHeight),
-                    IM_COL32(255, 255, 0, 255),
-                    2.0f
-                );
-
-                const float triangleSize = 6.0f;
-                ImVec2 trianglePoints[3];
-
-                trianglePoints[0] = ImVec2(insertX - triangleSize, winPos.y - 2);
-                trianglePoints[1] = ImVec2(insertX + triangleSize, winPos.y - 2);
-                trianglePoints[2] = ImVec2(insertX, winPos.y - 2 + triangleSize);
-                drawList->AddTriangleFilled(
-                    trianglePoints[0], trianglePoints[1], trianglePoints[2],
-                    IM_COL32(255, 255, 0, 255)
-                );
-
-                trianglePoints[0] = ImVec2(insertX - triangleSize, winPos.y + entryHeight);
-                trianglePoints[1] = ImVec2(insertX + triangleSize, winPos.y + entryHeight);
-                trianglePoints[2] = ImVec2(insertX, winPos.y + entryHeight - triangleSize);
-                drawList->AddTriangleFilled(
-                    trianglePoints[0], trianglePoints[1], trianglePoints[2],
-                    IM_COL32(255, 255, 0, 255)
-                );
-            }
-        }
-
-        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            if (dragState.targetInsertIdx >= 0 &&
-                dragState.draggedEntryIdx >= 0 &&
-                dragState.draggedEntryIdx < anim.entries.size() &&
-                dragState.targetInsertIdx <= anim.entries.size()) {
-
-                AnimationEntry movedEntry = anim.entries[dragState.draggedEntryIdx];
-
-                anim.entries.erase(anim.entries.begin() + dragState.draggedEntryIdx);
-
-                int targetIdx = dragState.targetInsertIdx;
-                if (dragState.draggedEntryIdx < targetIdx)
-                    targetIdx--;
-
-                targetIdx = SDL_clamp(targetIdx, 0, static_cast<int>(anim.entries.size()));
-
-                anim.entries.insert(anim.entries.begin() + targetIdx, movedEntry);
-
-                recalculateTotalFrames();
+                else {
+                    remainingEntries.push_back(anim.entries[idx]);
+                }
             }
 
-            dragState.isDragging = false;
-            dragState.draggedEntryIdx = -1;
-            dragState.targetInsertIdx = -1;
+            remainingEntries.insert(
+                remainingEntries.begin() + finalInsertIdx,
+                movedEntries.begin(),
+                movedEntries.end());
+            anim.entries = remainingEntries;
+
+            timelineSelectedEntryIndices.clear();
+            for (int i = 0; i < static_cast<int>(draggedEntryIndices.size()); ++i) {
+                timelineSelectedEntryIndices.push_back(finalInsertIdx + i);
+            }
+
+            int animIdx = currentAnimation;
+            undoManager.execute(std::make_unique<AnimationEntriesAction>(
+                draggedEntryIndices.size() > 1 ? "Move Timeline Entries" : "Move Timeline Entry",
+                [this, animIdx]() -> std::vector<AnimationEntry>* {
+                    if (animIdx >= 0 && animIdx < static_cast<int>(animations.size())) {
+                        return &animations[animIdx].entries;
+                    }
+                    return nullptr;
+                },
+                oldEntries,
+                anim.entries));
+
+            recalculateTotalFrames();
         }
+
+        dragState.isDragging = false;
+        dragState.draggedEntryIdx = -1;
+        dragState.draggedEntryIndices.clear();
+        dragState.targetInsertIdx = -1;
+        dragState.offsetFromDraggedBlockLeft = 0.0f;
     }
 }

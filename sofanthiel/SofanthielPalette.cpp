@@ -18,7 +18,7 @@ void Sofanthiel::handlePalette()
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_MINUS " Remove Palette") && palettes.size() > 0) {
         palettes.pop_back();
-        currentPalette = SDL_clamp(currentPalette, 0, (int)palettes.size() - 1);
+        currentPalette = palettes.empty() ? 0 : SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
     }
 
     ImGui::SameLine();
@@ -32,7 +32,7 @@ void Sofanthiel::handlePalette()
     ImGui::BeginChild("PaletteContent", ImVec2(0, contentHeight), ImGuiChildFlags_None);
 
     ImVec2 contentCenter = calculateContentCenter();
-    ImVec2 baseSize = ImVec2(16 * 16, 16 * palettes.size());
+    ImVec2 baseSize = ImVec2(16.0f * 16.0f, 16.0f * static_cast<float>(palettes.size()));
     ImVec2 origin = paletteView.calculateOrigin(contentCenter, baseSize);
 
     drawPaletteContent(origin);
@@ -293,7 +293,7 @@ void Sofanthiel::handlePaletteRowSelection(const ImVec2& origin)
                 int oldCurrentPalette = currentPalette;
 
                 palettes.erase(palettes.begin() + selectedPaletteRow);
-                currentPalette = SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
+                currentPalette = palettes.empty() ? 0 : SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
                 if (selectedPaletteRow >= static_cast<int>(palettes.size())) {
                     selectedPaletteRow = static_cast<int>(palettes.size()) - 1;
                 }
@@ -453,7 +453,7 @@ void Sofanthiel::handlePaletteContextMenu()
             int oldCurrentPalette = currentPalette;
 
             palettes.erase(palettes.begin() + selectedPaletteRow);
-            currentPalette = SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
+            currentPalette = palettes.empty() ? 0 : SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
             if (selectedPaletteRow >= static_cast<int>(palettes.size())) {
                 selectedPaletteRow = static_cast<int>(palettes.size()) - 1;
             }
@@ -493,9 +493,16 @@ void Sofanthiel::drawPaletteInfoPanel(ViewManager& view, ImVec2 mousePosInWindow
     ImGui::SameLine();
     ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
     ImGui::SameLine();
-    ImGui::Text("Pal: %.0f  Color: %.0f",
-        SDL_clamp(floor((mousePosInWindow.y / view.zoom / 16)), 0, palettes.empty() ? 0 : palettes.size() - 1),
-        SDL_clamp(floor((mousePosInWindow.x / view.zoom / 16)), 0, 15));
+    int hoveredPalette = palettes.empty() ? 0 :
+        SDL_clamp(
+            static_cast<int>(std::floor(mousePosInWindow.y / view.zoom / 16.0f)),
+            0,
+            static_cast<int>(palettes.size()) - 1);
+    int hoveredColor = SDL_clamp(
+        static_cast<int>(std::floor(mousePosInWindow.x / view.zoom / 16.0f)),
+        0,
+        15);
+    ImGui::Text("Pal: %d  Color: %d", hoveredPalette, hoveredColor);
 
     float resetWidth = ImGui::CalcTextSize(ICON_FA_ROTATE " Reset").x + ImGui::GetStyle().FramePadding.x * 2;
     ImGui::SameLine(ImGui::GetWindowWidth() - resetWidth - ImGui::GetStyle().WindowPadding.x);

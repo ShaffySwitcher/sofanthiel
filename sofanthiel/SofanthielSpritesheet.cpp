@@ -111,7 +111,7 @@ void Sofanthiel::drawSingleTile(ImDrawList* drawList, float xPos, float yPos, in
     TileData tile = tiles.getTile(tileIndex);
     float pixelSize = spritesheetView.zoom;
 
-    int safePalette = SDL_clamp(currentPalette, 0, palettes.size() - 1);
+    int safePalette = SDL_clamp(currentPalette, 0, static_cast<int>(palettes.size()) - 1);
 
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 8; x++) {

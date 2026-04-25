@@ -40,6 +40,425 @@ void* loadFileToHeapBuffer(const char* path, size_t& outSize)
     return buffer;
 }
 
+struct RomAnimationImportParseResult {
+    bool success = false;
+    uint32_t animationPointer = 0;
+    Animation animation;
+    std::vector<AnimationCel> cels;
+    std::vector<uint32_t> entryPointers;
+    std::vector<uint32_t> celPointers;
+    std::string errorMessage;
+    std::string warningMessage;
+};
+
+std::string trimString(const std::string& value)
+{
+    size_t start = value.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return "";
+    }
+
+    size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(start, end - start + 1);
+}
+
+void copyStringToBuffer(char* buffer, size_t bufferSize, const std::string& value)
+{
+    if (buffer == nullptr || bufferSize == 0) {
+        return;
+    }
+
+    std::snprintf(buffer, bufferSize, "%s", value.c_str());
+}
+
+std::string getFileStem(const std::string& path)
+{
+    size_t lastSlash = path.find_last_of("/\\");
+    size_t nameStart = (lastSlash == std::string::npos) ? 0 : lastSlash + 1;
+    size_t lastDot = path.find_last_of('.');
+    if (lastDot == std::string::npos || lastDot < nameStart) {
+        lastDot = path.size();
+    }
+
+    return path.substr(nameStart, lastDot - nameStart);
+}
+
+std::string sanitizeRomImportName(const std::string& value)
+{
+    std::string sanitized;
+    sanitized.reserve(value.size());
+
+    bool lastWasUnderscore = false;
+    for (unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '_') {
+            sanitized.push_back(static_cast<char>(ch));
+            lastWasUnderscore = false;
+        }
+        else if (!lastWasUnderscore) {
+            sanitized.push_back('_');
+            lastWasUnderscore = true;
+        }
+    }
+
+    sanitized = trimString(sanitized);
+    while (!sanitized.empty() && sanitized.front() == '_') {
+        sanitized.erase(sanitized.begin());
+    }
+    while (!sanitized.empty() && sanitized.back() == '_') {
+        sanitized.pop_back();
+    }
+
+    if (sanitized.empty()) {
+        sanitized = "rom";
+    }
+
+    return sanitized;
+}
+
+std::string formatGbaPointer(uint32_t pointer)
+{
+    std::ostringstream oss;
+    oss << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << pointer;
+    return oss.str();
+}
+
+std::string buildRomImportSuggestedAnimationName(const std::string& romPath, uint32_t animationPointer)
+{
+    return sanitizeRomImportName(getFileStem(romPath)) + "_" + formatGbaPointer(animationPointer);
+}
+
+std::string buildRomImportSuggestedCelPrefix(const std::string& romPath, uint32_t animationPointer)
+{
+    return buildRomImportSuggestedAnimationName(romPath, animationPointer) + "_cel";
+}
+
+std::string buildRomImportCelName(const std::string& celPrefix, int index)
+{
+    std::ostringstream oss;
+    oss << celPrefix << std::setw(3) << std::setfill('0') << index;
+    return oss.str();
+}
+
+int calculateAnimationTotalFrames(const Animation& anim)
+{
+    int totalFrames = 0;
+    for (const auto& entry : anim.entries) {
+        totalFrames += entry.duration;
+    }
+    return totalFrames;
+}
+
+bool shouldUpdateSuggestedBuffer(const char* currentValue, const std::string& previousSuggestedValue)
+{
+    std::string current = trimString(currentValue == nullptr ? "" : currentValue);
+    return current.empty() || current == previousSuggestedValue;
+}
+
+bool loadBinaryFile(const std::string& path, std::vector<uint8_t>& outData)
+{
+    outData.clear();
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    std::streamsize fileSize = file.tellg();
+    if (fileSize <= 0) {
+        return false;
+    }
+
+    file.seekg(0, std::ios::beg);
+    outData.resize(static_cast<size_t>(fileSize));
+    return file.read(reinterpret_cast<char*>(outData.data()), fileSize).good();
+}
+
+bool tryReadLittleU16(const std::vector<uint8_t>& data, size_t offset, uint16_t& outValue)
+{
+    if (offset + sizeof(uint16_t) > data.size()) {
+        return false;
+    }
+
+    outValue = static_cast<uint16_t>(data[offset]) |
+        (static_cast<uint16_t>(data[offset + 1]) << 8);
+    return true;
+}
+
+bool tryReadLittleU32(const std::vector<uint8_t>& data, size_t offset, uint32_t& outValue)
+{
+    if (offset + sizeof(uint32_t) > data.size()) {
+        return false;
+    }
+
+    outValue = static_cast<uint32_t>(data[offset]) |
+        (static_cast<uint32_t>(data[offset + 1]) << 8) |
+        (static_cast<uint32_t>(data[offset + 2]) << 16) |
+        (static_cast<uint32_t>(data[offset + 3]) << 24);
+    return true;
+}
+
+bool tryConvertRomPointerToOffset(uint32_t pointer, size_t romSize, size_t& outOffset, std::string* outError = nullptr)
+{
+    constexpr uint32_t kGbaRomBase = 0x08000000;
+    outOffset = 0;
+
+    if ((pointer & 0xFF000000) != kGbaRomBase) {
+        if (outError != nullptr) {
+            *outError = "Pointers must be in the 0x08XXXXXX ROM address range.";
+        }
+        return false;
+    }
+
+    uint32_t rawOffset = pointer - kGbaRomBase;
+    if (rawOffset >= romSize) {
+        if (outError != nullptr) {
+            std::ostringstream oss;
+            oss << "Pointer 0x" << formatGbaPointer(pointer) << " points outside the selected ROM.";
+            *outError = oss.str();
+        }
+        return false;
+    }
+
+    outOffset = static_cast<size_t>(rawOffset);
+    return true;
+}
+
+bool tryParseRomAnimationPointerInput(const std::string& input, size_t romSize,
+    uint32_t& outPointer, std::string& outError)
+{
+    constexpr uint32_t kGbaRomBase = 0x08000000;
+
+    outPointer = 0;
+    std::string cleaned;
+    cleaned.reserve(input.size());
+
+    for (char ch : input) {
+        if (!std::isspace(static_cast<unsigned char>(ch)) && ch != '_') {
+            cleaned.push_back(ch);
+        }
+    }
+
+    if (cleaned.empty()) {
+        outError = "Enter a ROM offset such as 0x123456 or 08123456.";
+        return false;
+    }
+
+    if (cleaned.rfind("0x", 0) == 0 || cleaned.rfind("0X", 0) == 0) {
+        cleaned.erase(0, 2);
+    }
+
+    if (cleaned.empty()) {
+        outError = "Enter a ROM offset such as 0x123456 or 08123456.";
+        return false;
+    }
+
+    if (!std::all_of(cleaned.begin(), cleaned.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
+        outError = "The ROM offset may only contain hexadecimal digits.";
+        return false;
+    }
+
+    uint32_t parsedValue = 0;
+    try {
+        parsedValue = static_cast<uint32_t>(std::stoul(cleaned, nullptr, 16));
+    }
+    catch (...) {
+        outError = "Failed to parse the ROM offset.";
+        return false;
+    }
+
+    if (cleaned.size() <= 6) {
+        if (parsedValue >= romSize) {
+            outError = "That ROM offset points outside the selected ROM.";
+            return false;
+        }
+
+        outPointer = kGbaRomBase + parsedValue;
+        return true;
+    }
+
+    if (cleaned.size() != 8) {
+        outError = "Use either a 6-digit ROM offset (0xXXXXXX) or an 8-digit GBA pointer (08XXXXXX).";
+        return false;
+    }
+
+    size_t resolvedOffset = 0;
+    if (!tryConvertRomPointerToOffset(parsedValue, romSize, resolvedOffset, &outError)) {
+        return false;
+    }
+
+    outPointer = parsedValue;
+    return true;
+}
+
+bool tryParseRomCel(const std::vector<uint8_t>& romData, uint32_t celPointer,
+    const std::string& celName, AnimationCel& outCel, std::string& outError)
+{
+    constexpr uint16_t kMaxRomCelOams = 512;
+
+    size_t celOffset = 0;
+    if (!tryConvertRomPointerToOffset(celPointer, romData.size(), celOffset, &outError)) {
+        return false;
+    }
+
+    if ((celOffset % 2) != 0) {
+        outError = "Cel data must be aligned to 2 bytes.";
+        return false;
+    }
+
+    uint16_t oamCount = 0;
+    if (!tryReadLittleU16(romData, celOffset, oamCount)) {
+        outError = "Could not read the cel OAM count.";
+        return false;
+    }
+
+    if (oamCount > kMaxRomCelOams) {
+        std::ostringstream oss;
+        oss << "Cel at 0x" << formatGbaPointer(celPointer)
+            << " declares " << oamCount << " OAMs, which is above the safety limit.";
+        outError = oss.str();
+        return false;
+    }
+
+    size_t requiredBytes = sizeof(uint16_t) + static_cast<size_t>(oamCount) * sizeof(TengokuOAM);
+    if (celOffset + requiredBytes > romData.size()) {
+        outError = "Cel data extends past the end of the ROM.";
+        return false;
+    }
+
+    outCel = AnimationCel();
+    outCel.name = celName;
+    outCel.oams.reserve(oamCount);
+
+    size_t readOffset = celOffset + sizeof(uint16_t);
+    for (uint16_t i = 0; i < oamCount; ++i) {
+        uint16_t rawOam[3] = {};
+        if (!tryReadLittleU16(romData, readOffset, rawOam[0]) ||
+            !tryReadLittleU16(romData, readOffset + 2, rawOam[1]) ||
+            !tryReadLittleU16(romData, readOffset + 4, rawOam[2])) {
+            outError = "Could not read one of the OAM entries for the cel.";
+            return false;
+        }
+
+        TengokuOAM oam = {};
+        std::memcpy(&oam, rawOam, sizeof(TengokuOAM));
+        outCel.oams.push_back(oam);
+        readOffset += sizeof(TengokuOAM);
+    }
+
+    return true;
+}
+
+RomAnimationImportParseResult parseRomAnimationData(const std::vector<uint8_t>& romData, uint32_t animationPointer,
+    const std::string& animationName, const std::string& celPrefix)
+{
+    constexpr int kMaxRomAnimationEntries = 2048;
+
+    RomAnimationImportParseResult result;
+    result.animationPointer = animationPointer;
+
+    size_t animationOffset = 0;
+    if (!tryConvertRomPointerToOffset(animationPointer, romData.size(), animationOffset, &result.errorMessage)) {
+        return result;
+    }
+
+    if ((animationOffset % 4) != 0) {
+        result.warningMessage = "Animation data is not 4-byte aligned. Parsing anyway.";
+    }
+
+    result.animation.name = animationName;
+
+    std::unordered_map<uint32_t, int> celIndexByPointer;
+    int clampedDurationCount = 0;
+
+    for (int entryIndex = 0; entryIndex < kMaxRomAnimationEntries; ++entryIndex) {
+        size_t recordOffset = animationOffset + static_cast<size_t>(entryIndex) * 8;
+
+        uint32_t celPointer = 0;
+        uint32_t durationValue = 0;
+        if (!tryReadLittleU32(romData, recordOffset, celPointer) ||
+            !tryReadLittleU32(romData, recordOffset + 4, durationValue)) {
+            result.errorMessage = "Animation data ran off the end of the ROM before an end marker was found.";
+            result.animation.entries.clear();
+            result.cels.clear();
+            result.entryPointers.clear();
+            result.celPointers.clear();
+            return result;
+        }
+
+        if (celPointer == 0 && durationValue == 0) {
+            if (result.animation.entries.empty()) {
+                result.errorMessage = "The animation pointer immediately points to an end marker.";
+                return result;
+            }
+
+            if (clampedDurationCount > 0) {
+                std::ostringstream oss;
+                if (!result.warningMessage.empty()) {
+                    oss << result.warningMessage << "\n";
+                }
+                oss << clampedDurationCount << " duration value(s) were clamped to 255 frames.";
+                result.warningMessage = oss.str();
+            }
+
+            result.success = true;
+            return result;
+        }
+
+        if (celPointer == 0) {
+            std::ostringstream oss;
+            oss << "Entry " << entryIndex << " has a null cel pointer.";
+            result.errorMessage = oss.str();
+            return result;
+        }
+
+        if (durationValue == 0) {
+            std::ostringstream oss;
+            oss << "Entry " << entryIndex << " has a duration of 0.";
+            result.errorMessage = oss.str();
+            return result;
+        }
+
+        int celIndex = -1;
+        auto existingCel = celIndexByPointer.find(celPointer);
+        if (existingCel == celIndexByPointer.end()) {
+            AnimationCel cel;
+            std::string celError;
+            std::string celName = buildRomImportCelName(celPrefix, static_cast<int>(result.cels.size()));
+            if (!tryParseRomCel(romData, celPointer, celName, cel, celError)) {
+                std::ostringstream oss;
+                oss << "Failed to parse cel at 0x" << formatGbaPointer(celPointer) << ": " << celError;
+                result.errorMessage = oss.str();
+                return result;
+            }
+
+            celIndex = static_cast<int>(result.cels.size());
+            celIndexByPointer[celPointer] = celIndex;
+            result.cels.push_back(cel);
+            result.celPointers.push_back(celPointer);
+        }
+        else {
+            celIndex = existingCel->second;
+        }
+
+        AnimationEntry entry;
+        entry.celName = result.cels[static_cast<size_t>(celIndex)].name;
+        entry.duration = static_cast<uint8_t>(std::min<uint32_t>(durationValue, 255));
+        if (durationValue > 255) {
+            ++clampedDurationCount;
+        }
+
+        result.animation.entries.push_back(entry);
+        result.entryPointers.push_back(celPointer);
+    }
+
+    result.errorMessage = "The animation did not hit an 8-byte zero terminator before the safety limit.";
+    result.animation.entries.clear();
+    result.cels.clear();
+    result.entryPointers.clear();
+    result.celPointers.clear();
+    return result;
+}
+
 }
 
 Sofanthiel::Sofanthiel()
@@ -70,9 +489,6 @@ int Sofanthiel::run()
 
 bool Sofanthiel::init()
 {
-    //SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
-    //SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "1");
-
     if (!SDL_Init(SDL_INIT_VIDEO))
     {
         SDL_Log("Could not initialize SDL: %s", SDL_GetError());
@@ -223,15 +639,7 @@ void Sofanthiel::handleDroppedFile(const std::string& path)
         file.close();
 
         if (content.find("TO_RGB555") != std::string::npos && content.find("Palette") != std::string::npos) {
-            parsedPaletteGroups = ResourceManager::parsePalettesFromCFile(path);
-            if (!parsedPaletteGroups.empty()) {
-                paletteImportSelections.clear();
-                for (const auto& group : parsedPaletteGroups) {
-                    paletteImportSelections.push_back(
-                        std::vector<uint8_t>(group.palettes.size(), 1));
-                }
-                showPaletteImportPopup = true;
-            }
+            beginPaletteImport(ResourceManager::parsePalettesFromCFile(path));
         }
         else if (content.find("AnimationCel") != std::string::npos) {
             this->animationCels = ResourceManager::loadAnimationCels(path);
@@ -302,6 +710,899 @@ void syncImGuiDisplayMetrics(SDL_Window* window)
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 }
 
+void Sofanthiel::beginPaletteImport(const std::vector<ParsedCPaletteGroup>& groups)
+{
+    parsedPaletteGroups = groups;
+    paletteImportSelections.clear();
+    paletteImportSelections.reserve(parsedPaletteGroups.size());
+
+    for (const auto& group : parsedPaletteGroups) {
+        paletteImportSelections.push_back(std::vector<uint8_t>(group.palettes.size(), 1));
+    }
+
+    showPaletteImportPopup = !parsedPaletteGroups.empty();
+    paletteImportPopupPendingOpen = showPaletteImportPopup;
+    paletteImportPreviewGroupIndex = 0;
+    paletteImportPreviewPaletteIndex = 0;
+
+    for (int gi = 0; gi < static_cast<int>(parsedPaletteGroups.size()); ++gi) {
+        if (!parsedPaletteGroups[gi].palettes.empty()) {
+            paletteImportPreviewGroupIndex = gi;
+            break;
+        }
+    }
+}
+
+void Sofanthiel::handlePaletteImportPopup()
+{
+    auto clearPaletteImportState = [this]() {
+        showPaletteImportPopup = false;
+        paletteImportPopupPendingOpen = false;
+        parsedPaletteGroups.clear();
+        paletteImportSelections.clear();
+        paletteImportPreviewGroupIndex = 0;
+        paletteImportPreviewPaletteIndex = 0;
+    };
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 center = viewport->GetCenter();
+    ImVec2 minWindowSize(getScaledSize(560.0f), getScaledSize(380.0f));
+    ImVec2 maxWindowSize(viewport->WorkSize.x * 0.96f, viewport->WorkSize.y * 0.90f);
+    ImVec2 desiredSize(
+        ImClamp(viewport->WorkSize.x * 0.72f, minWindowSize.x, getScaledSize(920.0f)),
+        ImClamp(viewport->WorkSize.y * 0.78f, minWindowSize.y, getScaledSize(720.0f)));
+
+    if (paletteImportPopupPendingOpen) {
+        ImGui::OpenPopup("Import Palettes");
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(desiredSize, ImGuiCond_Appearing);
+        paletteImportPopupPendingOpen = false;
+    }
+
+    ImGui::SetNextWindowSizeConstraints(minWindowSize, maxWindowSize);
+
+    if (parsedPaletteGroups.empty()) {
+        clearPaletteImportState();
+        return;
+    }
+
+    bool keepOpen = showPaletteImportPopup;
+    if (ImGui::BeginPopupModal("Import Palettes", &keepOpen, ImGuiWindowFlags_NoSavedSettings)) {
+        showPaletteImportPopup = keepOpen;
+
+        auto collectSelectedPalettes = [this]() {
+            std::vector<Palette> selected;
+            for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
+                for (size_t pi = 0; pi < parsedPaletteGroups[gi].palettes.size(); ++pi) {
+                    if (paletteImportSelections[gi][pi] != 0) {
+                        selected.push_back(parsedPaletteGroups[gi].palettes[pi]);
+                    }
+                }
+            }
+            return selected;
+        };
+
+        auto ensurePreviewSelectionIsValid = [this]() {
+            if (parsedPaletteGroups.empty()) {
+                paletteImportPreviewGroupIndex = 0;
+                paletteImportPreviewPaletteIndex = 0;
+                return;
+            }
+
+            paletteImportPreviewGroupIndex = ImClamp(
+                paletteImportPreviewGroupIndex,
+                0,
+                static_cast<int>(parsedPaletteGroups.size()) - 1);
+
+            for (int attempt = 0; attempt < static_cast<int>(parsedPaletteGroups.size()); ++attempt) {
+                int groupIdx = (paletteImportPreviewGroupIndex + attempt) % static_cast<int>(parsedPaletteGroups.size());
+                const auto& group = parsedPaletteGroups[groupIdx];
+                if (!group.palettes.empty()) {
+                    paletteImportPreviewGroupIndex = groupIdx;
+                    paletteImportPreviewPaletteIndex = ImClamp(
+                        paletteImportPreviewPaletteIndex,
+                        0,
+                        static_cast<int>(group.palettes.size()) - 1);
+                    return;
+                }
+            }
+
+            paletteImportPreviewPaletteIndex = 0;
+        };
+
+        ensurePreviewSelectionIsValid();
+
+        int totalParsed = 0;
+        int totalSelectable = 0;
+        int totalSelected = 0;
+        for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
+            totalParsed += static_cast<int>(parsedPaletteGroups[gi].palettes.size());
+            totalSelectable += static_cast<int>(paletteImportSelections[gi].size());
+            for (uint8_t selected : paletteImportSelections[gi]) {
+                totalSelected += (selected != 0) ? 1 : 0;
+            }
+        }
+
+        std::vector<Palette> selectedPalettes = collectSelectedPalettes();
+        int selectedCount = static_cast<int>(selectedPalettes.size());
+        int currentPaletteCount = static_cast<int>(palettes.size());
+        int appendCapacity = ImMax(0, 16 - currentPaletteCount);
+        bool canReplace = selectedCount > 0 && selectedCount <= 16;
+        bool canAppend = selectedCount > 0 && selectedCount <= appendCapacity;
+
+        ImGui::TextWrapped(
+            "Found %zu group(s) containing %d palette(s). Select the palettes you want to import, then preview them before committing.",
+            parsedPaletteGroups.size(), totalParsed);
+
+        if (!palettes.empty()) {
+            ImGui::TextColored(
+                ImVec4(0.72f, 0.75f, 0.42f, 1.0f),
+                "Current project palettes: %d / 16",
+                currentPaletteCount);
+        }
+        else {
+            ImGui::TextColored(
+                ImVec4(0.55f, 0.70f, 0.90f, 1.0f),
+                "Current project palettes: empty");
+        }
+
+        if (selectedCount > 16) {
+            ImGui::TextColored(
+                ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                "Too many palettes selected. Sofanthiel supports importing up to 16 at a time.");
+        }
+        else if (selectedCount > appendCapacity) {
+            ImGui::TextColored(
+                ImVec4(1.0f, 0.55f, 0.35f, 1.0f),
+                "Append would exceed the 16-palette limit. Reduce the selection or use Replace All.");
+        }
+        else {
+            ImGui::TextDisabled("%d / %d selected", totalSelected, totalSelectable);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float footerHeight = ImGui::GetFrameHeightWithSpacing() * 2.0f + getScaledSize(20.0f);
+        float listHeight = ImMax(getScaledSize(240.0f), ImGui::GetContentRegionAvail().y - footerHeight);
+        float leftPaneWidth = ImMin(getScaledSize(430.0f), ImGui::GetContentRegionAvail().x * 0.62f);
+
+        ImGui::BeginChild("PaletteImportSelectionPane", ImVec2(leftPaneWidth, listHeight), ImGuiChildFlags_Borders);
+
+        if (ImGui::SmallButton("Select All")) {
+            for (auto& selections : paletteImportSelections) {
+                for (uint8_t& selected : selections) {
+                    selected = 1;
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Deselect All")) {
+            for (auto& selections : paletteImportSelections) {
+                for (uint8_t& selected : selections) {
+                    selected = 0;
+                }
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Hover a palette to preview it");
+        ImGui::Separator();
+
+        for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
+            const auto& group = parsedPaletteGroups[gi];
+            auto& selections = paletteImportSelections[gi];
+
+            int selectedInGroup = 0;
+            for (uint8_t selected : selections) {
+                selectedInGroup += (selected != 0) ? 1 : 0;
+            }
+
+            ImGui::PushID(static_cast<int>(gi));
+            ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_DefaultOpen;
+            bool opened = ImGui::TreeNodeEx(
+                "##PaletteImportGroup",
+                nodeFlags,
+                "%s  (%d / %zu selected)",
+                group.name.c_str(),
+                selectedInGroup,
+                group.palettes.size());
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("All")) {
+                for (uint8_t& selected : selections) {
+                    selected = 1;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("None")) {
+                for (uint8_t& selected : selections) {
+                    selected = 0;
+                }
+            }
+
+            if (opened) {
+                for (size_t pi = 0; pi < group.palettes.size(); ++pi) {
+                    ImGui::PushID(static_cast<int>(pi));
+
+                    bool checked = selections[pi] != 0;
+                    bool isPreviewed = paletteImportPreviewGroupIndex == static_cast<int>(gi) &&
+                        paletteImportPreviewPaletteIndex == static_cast<int>(pi);
+
+                    if (isPreviewed) {
+                        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.24f, 0.33f, 0.45f, 0.55f));
+                    }
+
+                    if (ImGui::Checkbox("##ImportPaletteToggle", &checked)) {
+                        selections[pi] = checked ? 1 : 0;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        paletteImportPreviewGroupIndex = static_cast<int>(gi);
+                        paletteImportPreviewPaletteIndex = static_cast<int>(pi);
+                    }
+
+                    if (isPreviewed) {
+                        ImGui::PopStyleColor();
+                    }
+
+                    ImGui::SameLine();
+
+                    char label[64];
+                    snprintf(label, sizeof(label), "Palette %02d", static_cast<int>(pi));
+                    if (ImGui::Selectable(label, isPreviewed, ImGuiSelectableFlags_AllowDoubleClick)) {
+                        paletteImportPreviewGroupIndex = static_cast<int>(gi);
+                        paletteImportPreviewPaletteIndex = static_cast<int>(pi);
+                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                            selections[pi] = selections[pi] == 0 ? 1 : 0;
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        paletteImportPreviewGroupIndex = static_cast<int>(gi);
+                        paletteImportPreviewPaletteIndex = static_cast<int>(pi);
+                    }
+
+                    ImGui::SameLine();
+                    ImVec2 swatchStart = ImGui::GetCursorScreenPos();
+                    float swatchSize = ImGui::GetTextLineHeight();
+                    float swatchSpacing = 2.0f;
+                    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+                    if (isPreviewed) {
+                        ImVec2 previewBorderMin(swatchStart.x - 3.0f, swatchStart.y - 2.0f);
+                        ImVec2 previewBorderMax(
+                            swatchStart.x + 16.0f * (swatchSize + swatchSpacing) - swatchSpacing + 3.0f,
+                            swatchStart.y + swatchSize + 2.0f);
+                        drawList->AddRectFilled(previewBorderMin, previewBorderMax, IM_COL32(90, 130, 200, 38));
+                        drawList->AddRect(previewBorderMin, previewBorderMax, IM_COL32(120, 170, 255, 170));
+                    }
+
+                    for (int ci = 0; ci < 16; ++ci) {
+                        const SDL_Color& color = group.palettes[pi].colors[ci];
+                        ImVec2 p0(swatchStart.x + ci * (swatchSize + swatchSpacing), swatchStart.y);
+                        ImVec2 p1(p0.x + swatchSize, p0.y + swatchSize);
+                        drawList->AddRectFilled(p0, p1, IM_COL32(color.r, color.g, color.b, 255));
+                        drawList->AddRect(p0, p1, IM_COL32(45, 45, 45, 255));
+                    }
+
+                    ImGui::Dummy(ImVec2(16.0f * (swatchSize + swatchSpacing), swatchSize));
+                    if (ImGui::IsItemHovered()) {
+                        paletteImportPreviewGroupIndex = static_cast<int>(gi);
+                        paletteImportPreviewPaletteIndex = static_cast<int>(pi);
+                    }
+
+                    ImGui::PopID();
+                }
+
+                ImGui::TreePop();
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        ImGui::BeginChild("PaletteImportPreviewPane", ImVec2(0, listHeight), ImGuiChildFlags_Borders);
+        const auto& previewGroup = parsedPaletteGroups[paletteImportPreviewGroupIndex];
+        const Palette& previewPalette = previewGroup.palettes[paletteImportPreviewPaletteIndex];
+        bool previewSelected = paletteImportSelections[paletteImportPreviewGroupIndex][paletteImportPreviewPaletteIndex] != 0;
+
+        ImGui::TextColored(ImVec4(0.70f, 0.80f, 0.95f, 1.0f), "%s", previewGroup.name.c_str());
+        ImGui::Text("Palette %02d", paletteImportPreviewPaletteIndex);
+        ImGui::SameLine();
+        ImGui::TextDisabled(previewSelected ? "Selected" : "Not selected");
+        ImGui::Spacing();
+
+        float previewCellSize = getScaledSize(26.0f);
+        float previewSpacing = getScaledSize(5.0f);
+        ImDrawList* previewDrawList = ImGui::GetWindowDrawList();
+        ImVec2 previewOrigin = ImGui::GetCursorScreenPos();
+
+        for (int ci = 0; ci < 16; ++ci) {
+            int col = ci % 8;
+            int row = ci / 8;
+            const SDL_Color& color = previewPalette.colors[ci];
+            ImVec2 p0(
+                previewOrigin.x + col * (previewCellSize + previewSpacing),
+                previewOrigin.y + row * (previewCellSize + previewSpacing));
+            ImVec2 p1(p0.x + previewCellSize, p0.y + previewCellSize);
+            previewDrawList->AddRectFilled(p0, p1, IM_COL32(color.r, color.g, color.b, 255));
+            previewDrawList->AddRect(p0, p1, IM_COL32(40, 40, 40, 255));
+        }
+
+        ImGui::Dummy(ImVec2(
+            8.0f * (previewCellSize + previewSpacing),
+            2.0f * (previewCellSize + previewSpacing)));
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        for (int ci = 0; ci < 16; ++ci) {
+            const SDL_Color& color = previewPalette.colors[ci];
+            ImGui::Text(
+                "%02d  #%02X%02X%02X",
+                ci,
+                static_cast<unsigned int>(color.r),
+                static_cast<unsigned int>(color.g),
+                static_cast<unsigned int>(color.b));
+            if ((ci % 2) == 0) {
+                ImGui::SameLine(getScaledSize(150.0f));
+            }
+        }
+
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto applyImportedPalettes = [this, &clearPaletteImportState](const std::vector<Palette>& newPalettes, const char* actionName) {
+            std::vector<Palette> oldPalettes = palettes;
+            int oldCurrentPalette = currentPalette;
+            int oldSelectedPaletteRow = selectedPaletteRow;
+            int newCurrentPalette = newPalettes.empty() ? 0 :
+                SDL_clamp(currentPalette, 0, static_cast<int>(newPalettes.size()) - 1);
+            int newSelectedPaletteRow = newPalettes.empty() ? -1 :
+                SDL_clamp(selectedPaletteRow, -1, static_cast<int>(newPalettes.size()) - 1);
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                actionName,
+                [this, newPalettes, newCurrentPalette, newSelectedPaletteRow]() {
+                    this->palettes = newPalettes;
+                    this->currentPalette = newCurrentPalette;
+                    this->selectedPaletteRow = newSelectedPaletteRow;
+                },
+                [this, oldPalettes, oldCurrentPalette, oldSelectedPaletteRow]() {
+                    this->palettes = oldPalettes;
+                    this->currentPalette = oldCurrentPalette;
+                    this->selectedPaletteRow = oldSelectedPaletteRow;
+                }
+            ));
+
+            clearPaletteImportState();
+            ImGui::CloseCurrentPopup();
+        };
+
+        if (!canReplace) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button(ICON_FA_FILE_IMPORT " Replace All", getScaledButtonSize(140, 0))) {
+            applyImportedPalettes(selectedPalettes, "Replace Palettes");
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (selectedCount <= 0) {
+                ImGui::SetTooltip("Select at least one palette to replace the current set.");
+            }
+            else {
+                ImGui::SetTooltip("Replace all currently loaded palettes with the selected import set.");
+            }
+        }
+        if (!canReplace) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+
+        if (!canAppend) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button(ICON_FA_PLUS " Append", getScaledButtonSize(120, 0))) {
+            std::vector<Palette> appendedPalettes = palettes;
+            appendedPalettes.insert(appendedPalettes.end(), selectedPalettes.begin(), selectedPalettes.end());
+            applyImportedPalettes(appendedPalettes, "Append Palettes");
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (selectedCount <= 0) {
+                ImGui::SetTooltip("Select at least one palette to append.");
+            }
+            else {
+                ImGui::SetTooltip("Append the selected palettes after the currently loaded ones.");
+            }
+        }
+        if (!canAppend) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_FA_XMARK " Cancel", getScaledButtonSize(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            clearPaletteImportState();
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+    else if (!keepOpen) {
+        clearPaletteImportState();
+    }
+
+    if (!showPaletteImportPopup && !ImGui::IsPopupOpen("Import Palettes")) {
+        clearPaletteImportState();
+    }
+}
+
+void Sofanthiel::clearRomAnimationImportState()
+{
+    romAnimationImport = RomAnimationImportState();
+}
+
+void Sofanthiel::beginRomAnimationImport(const std::string& romPath)
+{
+    std::vector<uint8_t> romData;
+    if (!loadBinaryFile(romPath, romData)) {
+        SDL_Log("Failed to open ROM file for import: %s", romPath.c_str());
+        return;
+    }
+
+    clearRomAnimationImportState();
+    romAnimationImport.romPath = romPath;
+    romAnimationImport.romData = std::move(romData);
+    romAnimationImport.showPopup = true;
+    romAnimationImport.popupPendingOpen = true;
+    romAnimationImport.errorMessage = "Enter a ROM offset such as 0x123456 or 08123456.";
+}
+
+void Sofanthiel::refreshRomAnimationImportPreview()
+{
+    romAnimationImport.previewValid = false;
+    romAnimationImport.resolvedAnimationPointer = 0;
+    romAnimationImport.previewAnimation = Animation();
+    romAnimationImport.previewCels.clear();
+    romAnimationImport.previewEntryPointers.clear();
+    romAnimationImport.previewCelPointers.clear();
+    romAnimationImport.previewCurrentFrame = 0;
+    romAnimationImport.previewTotalFrames = 0;
+    romAnimationImport.previewLastTickMs = 0;
+    romAnimationImport.warningMessage.clear();
+
+    if (romAnimationImport.romData.empty()) {
+        romAnimationImport.errorMessage = "Choose a ROM file first.";
+        return;
+    }
+
+    std::string pointerError;
+    uint32_t animationPointer = 0;
+    if (!tryParseRomAnimationPointerInput(
+        romAnimationImport.offsetBuffer,
+        romAnimationImport.romData.size(),
+        animationPointer,
+        pointerError)) {
+        romAnimationImport.errorMessage = pointerError;
+        return;
+    }
+
+    std::string newSuggestedAnimationName = buildRomImportSuggestedAnimationName(
+        romAnimationImport.romPath,
+        animationPointer);
+    std::string newSuggestedCelPrefix = buildRomImportSuggestedCelPrefix(
+        romAnimationImport.romPath,
+        animationPointer);
+
+    if (shouldUpdateSuggestedBuffer(
+        romAnimationImport.animationNameBuffer,
+        romAnimationImport.suggestedAnimationName)) {
+        copyStringToBuffer(
+            romAnimationImport.animationNameBuffer,
+            sizeof(romAnimationImport.animationNameBuffer),
+            newSuggestedAnimationName);
+    }
+
+    if (shouldUpdateSuggestedBuffer(
+        romAnimationImport.celPrefixBuffer,
+        romAnimationImport.suggestedCelPrefix)) {
+        copyStringToBuffer(
+            romAnimationImport.celPrefixBuffer,
+            sizeof(romAnimationImport.celPrefixBuffer),
+            newSuggestedCelPrefix);
+    }
+
+    romAnimationImport.suggestedAnimationName = newSuggestedAnimationName;
+    romAnimationImport.suggestedCelPrefix = newSuggestedCelPrefix;
+    romAnimationImport.resolvedAnimationPointer = animationPointer;
+
+    std::string animationName = trimString(romAnimationImport.animationNameBuffer);
+    std::string celPrefix = trimString(romAnimationImport.celPrefixBuffer);
+
+    if (animationName.empty()) {
+        romAnimationImport.errorMessage = "Animation name cannot be empty.";
+        return;
+    }
+
+    if (celPrefix.empty()) {
+        romAnimationImport.errorMessage = "Cel name prefix cannot be empty.";
+        return;
+    }
+
+    RomAnimationImportParseResult parseResult = parseRomAnimationData(
+        romAnimationImport.romData,
+        animationPointer,
+        animationName,
+        celPrefix);
+
+    romAnimationImport.errorMessage = parseResult.errorMessage;
+    romAnimationImport.warningMessage = parseResult.warningMessage;
+
+    if (!parseResult.success) {
+        return;
+    }
+
+    romAnimationImport.previewValid = true;
+    romAnimationImport.previewAnimation = std::move(parseResult.animation);
+    romAnimationImport.previewCels = std::move(parseResult.cels);
+    romAnimationImport.previewEntryPointers = std::move(parseResult.entryPointers);
+    romAnimationImport.previewCelPointers = std::move(parseResult.celPointers);
+    romAnimationImport.previewTotalFrames = calculateAnimationTotalFrames(romAnimationImport.previewAnimation);
+    romAnimationImport.previewLastTickMs = SDL_GetTicks();
+}
+
+void Sofanthiel::handleRomAnimationImportPopup()
+{
+    auto closePopup = [this]() {
+        clearRomAnimationImportState();
+        ImGui::CloseCurrentPopup();
+    };
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 center = viewport->GetCenter();
+    ImVec2 minWindowSize(getScaledSize(760.0f), getScaledSize(480.0f));
+    ImVec2 maxWindowSize(viewport->WorkSize.x * 0.96f, viewport->WorkSize.y * 0.92f);
+    ImVec2 desiredSize(
+        ImClamp(viewport->WorkSize.x * 0.78f, minWindowSize.x, getScaledSize(1040.0f)),
+        ImClamp(viewport->WorkSize.y * 0.82f, minWindowSize.y, getScaledSize(760.0f)));
+
+    if (romAnimationImport.popupPendingOpen) {
+        ImGui::OpenPopup("Import Animation From ROM");
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(desiredSize, ImGuiCond_Appearing);
+        romAnimationImport.popupPendingOpen = false;
+    }
+
+    ImGui::SetNextWindowSizeConstraints(minWindowSize, maxWindowSize);
+
+    if (romAnimationImport.showPopup &&
+        (romAnimationImport.romPath.empty() || romAnimationImport.romData.empty())) {
+        clearRomAnimationImportState();
+        return;
+    }
+
+    bool keepOpen = romAnimationImport.showPopup;
+    if (ImGui::BeginPopupModal("Import Animation From ROM", &keepOpen, ImGuiWindowFlags_NoSavedSettings)) {
+        romAnimationImport.showPopup = keepOpen;
+
+        bool refreshPreview = false;
+
+        ImGui::TextWrapped("Selected ROM: %s", romAnimationImport.romPath.c_str());
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(getScaledSize(220.0f));
+        if (ImGui::InputText("ROM Offset", romAnimationImport.offsetBuffer, sizeof(romAnimationImport.offsetBuffer))) {
+            refreshPreview = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Accepts either 0xXXXXXX ROM offsets or 08XXXXXX GBA ROM pointers.");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh Preview")) {
+            refreshPreview = true;
+        }
+
+        if (romAnimationImport.resolvedAnimationPointer != 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Resolved: 0x%s", formatGbaPointer(romAnimationImport.resolvedAnimationPointer).c_str());
+        }
+
+        ImGui::SetNextItemWidth(getScaledSize(320.0f));
+        if (ImGui::InputText(
+            "Animation Name",
+            romAnimationImport.animationNameBuffer,
+            sizeof(romAnimationImport.animationNameBuffer))) {
+            refreshPreview = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Use Placeholder##RomAnimName")) {
+            copyStringToBuffer(
+                romAnimationImport.animationNameBuffer,
+                sizeof(romAnimationImport.animationNameBuffer),
+                romAnimationImport.suggestedAnimationName);
+            refreshPreview = true;
+        }
+
+        ImGui::SetNextItemWidth(getScaledSize(320.0f));
+        if (ImGui::InputText(
+            "Cel Name Prefix",
+            romAnimationImport.celPrefixBuffer,
+            sizeof(romAnimationImport.celPrefixBuffer))) {
+            refreshPreview = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Use Placeholder##RomCelPrefix")) {
+            copyStringToBuffer(
+                romAnimationImport.celPrefixBuffer,
+                sizeof(romAnimationImport.celPrefixBuffer),
+                romAnimationImport.suggestedCelPrefix);
+            refreshPreview = true;
+        }
+
+        if (refreshPreview) {
+            refreshRomAnimationImportPreview();
+        }
+
+        std::string importValidationError;
+        bool canImport = romAnimationImport.previewValid;
+
+        if (romAnimationImport.previewValid) {
+            if (!isAnimationNameUnique(romAnimationImport.previewAnimation.name)) {
+                importValidationError = "An animation with that name already exists in the project.";
+                canImport = false;
+            }
+            else {
+                std::unordered_set<std::string> seenCelNames;
+                for (const auto& cel : romAnimationImport.previewCels) {
+                    if (!seenCelNames.insert(cel.name).second) {
+                        importValidationError = "The cel name prefix produced duplicate cel names.";
+                        canImport = false;
+                        break;
+                    }
+
+                    if (!isCelNameUnique(cel.name)) {
+                        importValidationError = "One or more imported cel names already exist in the project.";
+                        canImport = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!romAnimationImport.errorMessage.empty()) {
+            if (trimString(romAnimationImport.offsetBuffer).empty()) {
+                ImGui::TextDisabled("%s", romAnimationImport.errorMessage.c_str());
+            }
+            else {
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", romAnimationImport.errorMessage.c_str());
+            }
+        }
+        else if (romAnimationImport.previewValid) {
+            ImGui::TextColored(
+                ImVec4(0.60f, 0.82f, 0.62f, 1.0f),
+                "Parsed %d entries using %d unique cels (%d total frames).",
+                static_cast<int>(romAnimationImport.previewAnimation.entries.size()),
+                static_cast<int>(romAnimationImport.previewCels.size()),
+                romAnimationImport.previewTotalFrames);
+        }
+        else {
+            ImGui::TextDisabled("Preview updates as soon as the ROM offset and names are valid.");
+        }
+
+        if (!romAnimationImport.warningMessage.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.38f, 1.0f), "%s", romAnimationImport.warningMessage.c_str());
+        }
+
+        if (!importValidationError.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.35f, 1.0f), "%s", importValidationError.c_str());
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float footerHeight = ImGui::GetFrameHeightWithSpacing() * 2.0f + getScaledSize(20.0f);
+        float contentHeight = ImMax(getScaledSize(260.0f), ImGui::GetContentRegionAvail().y - footerHeight);
+        float leftPaneWidth = ImMin(getScaledSize(430.0f), ImGui::GetContentRegionAvail().x * 0.48f);
+
+        ImGui::BeginChild("RomImportEntriesPane", ImVec2(leftPaneWidth, contentHeight), ImGuiChildFlags_Borders);
+        if (romAnimationImport.previewValid) {
+            ImGui::TextColored(
+                ImVec4(0.70f, 0.82f, 0.95f, 1.0f),
+                "%s",
+                romAnimationImport.previewAnimation.name.c_str());
+            ImGui::TextDisabled(
+                "%d entries  |  %d unique cels",
+                static_cast<int>(romAnimationImport.previewAnimation.entries.size()),
+                static_cast<int>(romAnimationImport.previewCels.size()));
+            ImGui::Separator();
+
+            for (size_t entryIdx = 0; entryIdx < romAnimationImport.previewAnimation.entries.size(); ++entryIdx) {
+                const AnimationEntry& entry = romAnimationImport.previewAnimation.entries[entryIdx];
+                uint32_t celPointer = entryIdx < romAnimationImport.previewEntryPointers.size()
+                    ? romAnimationImport.previewEntryPointers[entryIdx]
+                    : 0;
+                int oamCount = 0;
+                for (const auto& cel : romAnimationImport.previewCels) {
+                    if (cel.name == entry.celName) {
+                        oamCount = static_cast<int>(cel.oams.size());
+                        break;
+                    }
+                }
+
+                std::string pointerLabel = formatGbaPointer(celPointer);
+                ImGui::Text(
+                    "%03d  0x%s  %3d fr  %3d OAM  %s",
+                    static_cast<int>(entryIdx),
+                    pointerLabel.c_str(),
+                    static_cast<int>(entry.duration),
+                    oamCount,
+                    entry.celName.c_str());
+            }
+        }
+        else {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            const char* text = "Entry details appear here once a valid ROM animation is parsed.";
+            ImVec2 textSize = ImGui::CalcTextSize(text);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail.y - textSize.y) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImMax(0.0f, (avail.x - textSize.x) * 0.5f));
+            ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.54f, 1.0f), "%s", text);
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        ImGui::BeginChild("RomImportPreviewPane", ImVec2(0, contentHeight), ImGuiChildFlags_Borders);
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        if (romAnimationImport.previewValid && romAnimationImport.previewTotalFrames > 0) {
+            double msPerFrame = 1000.0 / std::max(1.0f, frameRate);
+            Uint64 now = SDL_GetTicks();
+            if (romAnimationImport.previewLastTickMs == 0) {
+                romAnimationImport.previewLastTickMs = now;
+            }
+            while (now > romAnimationImport.previewLastTickMs + static_cast<Uint64>(msPerFrame)) {
+                romAnimationImport.previewCurrentFrame =
+                    (romAnimationImport.previewCurrentFrame + 1) % romAnimationImport.previewTotalFrames;
+                romAnimationImport.previewLastTickMs += static_cast<Uint64>(msPerFrame);
+            }
+        }
+
+        if (romAnimationImport.previewValid) {
+            ImGui::Text("Preview");
+            ImGui::SameLine();
+            ImGui::TextDisabled(
+                "Frame %d / %d",
+                romAnimationImport.previewCurrentFrame,
+                romAnimationImport.previewTotalFrames > 0 ? romAnimationImport.previewTotalFrames - 1 : 0);
+
+            if (tiles.getSize() <= 0 || palettes.empty()) {
+                ImGui::TextDisabled("Showing OAM bounds only. Load tiles and palettes to render sprite pixels.");
+            }
+            else {
+                ImGui::TextDisabled("Using the currently loaded tiles and palettes for rendering.");
+            }
+
+            ImGui::Spacing();
+
+            ImVec2 previewAvail = ImGui::GetContentRegionAvail();
+            previewAvail.x = ImMax(previewAvail.x, getScaledSize(180.0f));
+            previewAvail.y = ImMax(previewAvail.y, getScaledSize(180.0f));
+
+            float previewScale = ImMin(
+                (previewAvail.x - getScaledSize(12.0f)) / previewSize.x,
+                (previewAvail.y - getScaledSize(12.0f)) / previewSize.y);
+            previewScale = ImClamp(previewScale, 0.75f, 4.0f);
+
+            ImVec2 canvasSize(previewSize.x * previewScale, previewSize.y * previewScale);
+            ImVec2 canvasCursor = ImGui::GetCursorScreenPos();
+            ImVec2 canvasOrigin(
+                canvasCursor.x + ImMax(0.0f, (previewAvail.x - canvasSize.x) * 0.5f),
+                canvasCursor.y + ImMax(0.0f, (previewAvail.y - canvasSize.y) * 0.5f));
+
+            float previewBackground[4] = { 0.12f, 0.12f, 0.15f, 1.0f };
+            drawBackground(drawList, canvasOrigin, canvasSize, previewBackground);
+            drawList->AddRect(
+                canvasOrigin,
+                ImVec2(canvasOrigin.x + canvasSize.x, canvasOrigin.y + canvasSize.y),
+                IM_COL32(105, 105, 120, 255));
+            drawAnimationFramePreview(
+                drawList,
+                canvasOrigin,
+                previewScale,
+                romAnimationImport.previewAnimation,
+                romAnimationImport.previewCels,
+                romAnimationImport.previewCurrentFrame,
+                ImVec2(0.0f, 0.0f));
+            drawGrid(drawList, canvasOrigin, canvasSize, previewScale);
+
+            ImGui::Dummy(ImVec2(ImMax(canvasSize.x, 1.0f), ImMax(canvasSize.y, 1.0f)));
+        }
+        else {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            const char* text = "Preview appears here once the importer can decode the animation safely.";
+            ImVec2 textSize = ImGui::CalcTextSize(text);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail.y - textSize.y) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImMax(0.0f, (avail.x - textSize.x) * 0.5f));
+            ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.54f, 1.0f), "%s", text);
+        }
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (!canImport) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button(ICON_FA_FILE_IMPORT " Import", getScaledButtonSize(120, 0))) {
+            std::vector<Animation> oldAnimations = animations;
+            std::vector<AnimationCel> oldAnimationCels = animationCels;
+            int oldCurrentAnimation = currentAnimation;
+            int oldCurrentFrame = currentFrame;
+
+            std::vector<Animation> newAnimations = animations;
+            std::vector<AnimationCel> newAnimationCels = animationCels;
+            newAnimations.push_back(romAnimationImport.previewAnimation);
+            newAnimationCels.insert(
+                newAnimationCels.end(),
+                romAnimationImport.previewCels.begin(),
+                romAnimationImport.previewCels.end());
+
+            int newCurrentAnimation = static_cast<int>(newAnimations.size()) - 1;
+
+            undoManager.execute(std::make_unique<LambdaAction>(
+                "Import Animation From ROM",
+                [this, newAnimations, newAnimationCels, newCurrentAnimation]() {
+                    animations = newAnimations;
+                    animationCels = newAnimationCels;
+                    currentAnimation = newCurrentAnimation;
+                    currentFrame = 0;
+                    timelineSelectedEntryIndices.clear();
+                    recalculateTotalFrames();
+                },
+                [this, oldAnimations, oldAnimationCels, oldCurrentAnimation, oldCurrentFrame]() {
+                    animations = oldAnimations;
+                    animationCels = oldAnimationCels;
+                    currentAnimation = oldCurrentAnimation;
+                    currentFrame = oldCurrentFrame;
+                    timelineSelectedEntryIndices.clear();
+                    recalculateTotalFrames();
+                }));
+
+            closePopup();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !canImport) {
+            if (!importValidationError.empty()) {
+                ImGui::SetTooltip("%s", importValidationError.c_str());
+            }
+            else if (!romAnimationImport.errorMessage.empty()) {
+                ImGui::SetTooltip("%s", romAnimationImport.errorMessage.c_str());
+            }
+        }
+        if (!canImport) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_FA_XMARK " Cancel", getScaledButtonSize(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            closePopup();
+        }
+
+        ImGui::EndPopup();
+    }
+    else if (!keepOpen) {
+        clearRomAnimationImportState();
+    }
+
+    if (!romAnimationImport.showPopup && !ImGui::IsPopupOpen("Import Animation From ROM")) {
+        clearRomAnimationImportState();
+    }
+}
+
 void Sofanthiel::update()
 {
     float currentDisplayScale = this->getCurrentDisplayScale();
@@ -358,173 +1659,8 @@ void Sofanthiel::update()
         }
     }
 
-    if (showPaletteImportPopup) {
-        ImGui::OpenPopup("Import Palettes");
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSizeConstraints(ImVec2(350, 200), ImVec2(600, 500));
-    }
-
-    if (ImGui::BeginPopupModal("Import Palettes", &showPaletteImportPopup, ImGuiWindowFlags_AlwaysAutoResize)) {
-        int totalParsed = 0;
-        for (const auto& g : parsedPaletteGroups)
-            totalParsed += static_cast<int>(g.palettes.size());
-
-        ImGui::TextWrapped(
-            "Found %zu group(s) containing %d palette(s) in the C file.",
-            parsedPaletteGroups.size(), totalParsed);
-
-        if (!this->palettes.empty()) {
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.4f, 1.0f),
-                "You currently have %zu palette(s) loaded.",
-                this->palettes.size());
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        int totalSelected = 0;
-        int totalSelectable = 0;
-        for (const auto& sel : paletteImportSelections) {
-            for (auto s : sel) { if (s) totalSelected++; totalSelectable++; }
-        }
-
-        if (ImGui::SmallButton("Select All")) {
-            for (auto& sel : paletteImportSelections)
-                for (auto& s : sel) s = 1;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Deselect All")) {
-            for (auto& sel : paletteImportSelections)
-                for (auto& s : sel) s = 0;
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%d / %d selected", totalSelected, totalSelectable);
-
-        ImGui::BeginChild("PaletteList", ImVec2(0, 300), ImGuiChildFlags_Borders);
-
-        for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
-            const auto& group = parsedPaletteGroups[gi];
-            auto& selections = paletteImportSelections[gi];
-
-            int selectedCount = 0;
-            for (auto s : selections) if (s) selectedCount++;
-
-            ImGui::PushID(static_cast<int>(gi));
-
-            if (ImGui::TreeNodeEx("##group", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap,
-                "%s (%d / %zu selected)", group.name.c_str(), selectedCount, group.palettes.size())) {
-
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("All  None").x - ImGui::GetStyle().ItemSpacing.x);
-                if (ImGui::SmallButton("All")) {
-                    for (size_t i = 0; i < selections.size(); ++i) selections[i] = 1;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("None")) {
-                    for (size_t i = 0; i < selections.size(); ++i) selections[i] = 0;
-                }
-
-                for (size_t pi = 0; pi < group.palettes.size(); ++pi) {
-                    ImGui::PushID(static_cast<int>(pi));
-
-                    char label[64];
-                    snprintf(label, sizeof(label), "Palette %02d", static_cast<int>(pi));
-                    bool checked = selections[pi] != 0;
-                    if (ImGui::Checkbox(label, &checked)) {
-                        selections[pi] = checked ? 1 : 0;
-                    }
-
-                    ImGui::SameLine();
-                    ImVec2 swatchStart = ImGui::GetCursorScreenPos();
-                    float swatchSize = ImGui::GetTextLineHeight();
-                    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-                    for (int ci = 0; ci < 16; ++ci) {
-                        const SDL_Color& c = group.palettes[pi].colors[ci];
-                        ImVec2 p0(swatchStart.x + ci * (swatchSize + 1), swatchStart.y);
-                        ImVec2 p1(p0.x + swatchSize, p0.y + swatchSize);
-                        dl->AddRectFilled(p0, p1, IM_COL32(c.r, c.g, c.b, 255));
-                        dl->AddRect(p0, p1, IM_COL32(60, 60, 60, 255));
-                    }
-
-                    ImGui::Dummy(ImVec2(16 * (swatchSize + 1), swatchSize));
-
-                    ImGui::PopID();
-                }
-
-                ImGui::TreePop();
-            }
-            else {
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("All  None").x - ImGui::GetStyle().ItemSpacing.x);
-                if (ImGui::SmallButton("All")) {
-                    for (size_t i = 0; i < selections.size(); ++i) selections[i] = 1;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("None")) {
-                    for (size_t i = 0; i < selections.size(); ++i) selections[i] = 0;
-                }
-            }
-
-            ImGui::PopID();
-        }
-
-        ImGui::EndChild();
-
-        totalSelected = 0;
-        for (const auto& sel : paletteImportSelections)
-            for (auto s : sel) if (s) totalSelected++;
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        bool canImport = totalSelected > 0;
-        if (!canImport) ImGui::BeginDisabled();
-
-        if (ImGui::Button(ICON_FA_FILE_IMPORT " Replace All", getScaledButtonSize(130, 0))) {
-            this->palettes.clear();
-            for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
-                for (size_t pi = 0; pi < parsedPaletteGroups[gi].palettes.size(); ++pi) {
-                    if (paletteImportSelections[gi][pi]) {
-                        this->palettes.push_back(parsedPaletteGroups[gi].palettes[pi]);
-                    }
-                }
-            }
-            this->currentPalette = 0;
-            showPaletteImportPopup = false;
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Clear all current palettes and import only the selected ones");
-        }
-
-        ImGui::SameLine();
-        if (ImGui::Button(ICON_FA_PLUS " Append", getScaledButtonSize(100, 0))) {
-            for (size_t gi = 0; gi < parsedPaletteGroups.size(); ++gi) {
-                for (size_t pi = 0; pi < parsedPaletteGroups[gi].palettes.size(); ++pi) {
-                    if (paletteImportSelections[gi][pi]) {
-                        this->palettes.push_back(parsedPaletteGroups[gi].palettes[pi]);
-                    }
-                }
-            }
-            showPaletteImportPopup = false;
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Add selected palettes after your existing ones");
-        }
-
-        if (!canImport) ImGui::EndDisabled();
-
-        ImGui::SameLine();
-        if (ImGui::Button(ICON_FA_XMARK " Cancel", getScaledButtonSize(100, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            showPaletteImportPopup = false;
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-    }
+    handlePaletteImportPopup();
+    handleRomAnimationImportPopup();
 
     if (!this->celEditingMode) {
         handleTimeline();
@@ -662,15 +1798,7 @@ void Sofanthiel::handleMenuBar()
                         if(outPathStr.substr(outPathStr.find_last_of(".") + 1) == "pal") {
                             this->palettes = ResourceManager::loadPalettes(outPath);
                         } else {
-                            parsedPaletteGroups = ResourceManager::parsePalettesFromCFile(outPath);
-                            if (!parsedPaletteGroups.empty()) {
-                                paletteImportSelections.clear();
-                                for (const auto& group : parsedPaletteGroups) {
-                                    paletteImportSelections.push_back(
-                                        std::vector<uint8_t>(group.palettes.size(), 1));
-                                }
-                                showPaletteImportPopup = true;
-                            }
+                            beginPaletteImport(ResourceManager::parsePalettesFromCFile(outPath));
                         }
                         free(outPath);
                     }
@@ -694,6 +1822,14 @@ void Sofanthiel::handleMenuBar()
 
                     if (result == NFD_OKAY) {
                         this->animations = ResourceManager::loadAnimations(outPath);
+                        free(outPath);
+                    }
+                }
+                if (ImGui::MenuItem("Import from ROM...")) {
+                    nfdresult_t result = NFD_OpenDialog("gba,bin", nullptr, &outPath);
+
+                    if (result == NFD_OKAY) {
+                        beginRomAnimationImport(std::string(outPath));
                         free(outPath);
                     }
                 }
@@ -912,7 +2048,7 @@ void Sofanthiel::handleMenuBar()
                 ImGui::MenuItem("Show Grid", nullptr, &showGrid);
                 if (ImGui::BeginMenu("Grid Size")) {
                     for (int i = 0; i < 5; i++) {
-                        int size = (i == 0) ? 1 : std::pow(2, i);
+                        int size = 1 << i;
                         if (ImGui::MenuItem((std::to_string(size) + "x" + std::to_string(size)).c_str(), nullptr, gridSize == size)) {
                             gridSize = size;
                         }
@@ -1525,7 +2661,7 @@ float Sofanthiel::getAutomaticDisplayScale() const
 float Sofanthiel::getCurrentDisplayScale() const
 {
     if (useManualDPIScale) {
-        return SDL_clamp(manualDPIScale, 1.0, 3.0);
+        return SDL_clamp(manualDPIScale, 1.0f, 3.0f);
     }
 
     return this->getAutomaticDisplayScale();
@@ -1538,9 +2674,9 @@ void Sofanthiel::applyDisplayScale(float displayScale)
     }
 
     if (!std::isfinite(displayScale)) {
-        displayScale = 1.0;
+        displayScale = 1.0f;
     }
-    displayScale = SDL_clamp(displayScale, 1.0, 3.0);
+    displayScale = SDL_clamp(displayScale, 1.0f, 3.0f);
 
     syncImGuiDisplayMetrics(this->window);
 

@@ -45,10 +45,34 @@ struct TimelineResizeState {
 struct TimelineDragState {
     bool isDragging = false;
     int draggedEntryIdx = -1;
+    std::vector<int> draggedEntryIndices;
     float dragStartPosX = 0.0f;
     float dragCurrentPosX = 0.0f;
-    float offsetFromEntryLeft = 0.0f;
+    float offsetFromDraggedBlockLeft = 0.0f;
     int targetInsertIdx = -1;
+};
+
+struct RomAnimationImportState {
+    bool showPopup = false;
+    bool popupPendingOpen = false;
+    bool previewValid = false;
+    std::string romPath;
+    std::vector<uint8_t> romData;
+    char offsetBuffer[32] = "";
+    char animationNameBuffer[256] = "";
+    char celPrefixBuffer[256] = "";
+    std::string suggestedAnimationName;
+    std::string suggestedCelPrefix;
+    std::string errorMessage;
+    std::string warningMessage;
+    uint32_t resolvedAnimationPointer = 0;
+    Animation previewAnimation;
+    std::vector<AnimationCel> previewCels;
+    std::vector<uint32_t> previewEntryPointers;
+    std::vector<uint32_t> previewCelPointers;
+    int previewCurrentFrame = 0;
+    int previewTotalFrames = 0;
+    Uint64 previewLastTickMs = 0;
 };
 
 //-----------------------------------------------------------------------------
@@ -93,7 +117,7 @@ private:
     void drawTimelineControls();
     void drawTimelineHeaders(float timelineStartX, float& syncScroll, float frameWidth);
     void drawTimelineContent(Animation& anim, float timelineStartX, float& syncScroll, float frameWidth, float requiredWidth);
-    void handleTimelineScrolling(float& syncScroll);
+    void handleTimelineScrolling(float& syncScroll, float& frameWidth);
     void drawTimelineMarker(ImDrawList* drawList, const ImVec2& winPos, float syncScroll, float frameWidth);
     void drawTimelineEntries(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
         float syncScroll, float frameWidth, TimelineResizeState& resizeState, std::vector<int>& selectedEntryIndices, float entryHeight, std::vector<AnimationEntry>& clipboardEntries);
@@ -106,12 +130,18 @@ private:
     void drawTimelineFrameCels(ImDrawList* drawList, const ImVec2& winPos, float syncScroll, int frameStartIndex, int duration, float frameWidth, float entryHeight);
     void handleTimelineResizing(Animation& anim, TimelineResizeState& resizeState, float syncScroll, float frameWidth);
     void handleTimelineAutoScroll(float syncScroll, float frameWidth);
-    void handleTimelineDragging(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
-        float syncScroll, float frameWidth, TimelineDragState& dragState, float entryHeight);
+    void drawTimelineDragPreview(Animation& anim, ImDrawList* drawList, const ImVec2& winPos,
+        float syncScroll, float frameWidth, const TimelineDragState& dragState,
+        const std::vector<int>& selectedEntryIndices, float entryHeight);
+    void handleTimelineDragging(Animation& anim, const ImVec2& winPos,
+        float& syncScroll, float frameWidth, TimelineDragState& dragState, float entryHeight);
 
     // preview
     void drawBackgroundTexture(ImDrawList* drawList, ImVec2 origin, ImVec2 scaledSize);
     void updateAnimationPlayback();
+    void drawAnimationFramePreview(ImDrawList* drawList, ImVec2 origin, float zoom,
+        const Animation& anim, const std::vector<AnimationCel>& cels,
+        int frame, ImVec2 animationOffset);
     void drawCurrentAnimationFrame(ImDrawList* drawList, ImVec2 origin, float zoom);
     void drawPreviewContent(const ImVec2& origin);
     void drawPreviewInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin);
@@ -137,6 +167,12 @@ private:
     void handlePaletteRowSelection(const ImVec2& origin);
     void handlePaletteContextMenu();
 	void initializeDefaultPalettes();
+    void beginPaletteImport(const std::vector<ParsedCPaletteGroup>& groups);
+    void handlePaletteImportPopup();
+    void beginRomAnimationImport(const std::string& romPath);
+    void clearRomAnimationImportState();
+    void refreshRomAnimationImportPreview();
+    void handleRomAnimationImportPopup();
 
     // oam preview
     void drawCelPreviewInfoPanel(ViewManager& view, ImVec2 mousePosInWindow, ImVec2 contentSize, const ImVec2& origin);
@@ -205,6 +241,7 @@ private:
     bool loopAnimation = true;
     float frameRate = 60.0f;
     float syncScroll = 0.0f;
+    float timelineHorizontalZoom = 1.0f;
 
     TimelineResizeState timelineResizeState;
     TimelineDragState timelineDragState;
@@ -278,8 +315,12 @@ private:
     char renameAnimationNameBuffer[128] = "";
 
     bool showPaletteImportPopup = false;
+    bool paletteImportPopupPendingOpen = false;
     std::vector<ParsedCPaletteGroup> parsedPaletteGroups;
     std::vector<std::vector<uint8_t>> paletteImportSelections;
+    int paletteImportPreviewGroupIndex = 0;
+    int paletteImportPreviewPaletteIndex = 0;
+    RomAnimationImportState romAnimationImport;
 
     int gifExportScale = 1;
 
