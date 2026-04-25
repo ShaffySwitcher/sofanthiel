@@ -689,7 +689,7 @@ void Sofanthiel::drawTimelineEntries(Animation& anim, ImDrawList* drawList, cons
 
         bool isSelected = std::find(selectedEntryIndices.begin(), selectedEntryIndices.end(), entryIdx) != selectedEntryIndices.end();
 
-        drawTimelineEntryBackground(drawList, winPos, syncScroll, entryIdx, celStartX, celWidth, isSelected, selectedEntryIndices, timelineHoveredEntryIdx, clipboardEntries, entryHeight);
+        drawTimelineEntryBackground(drawList, winPos, syncScroll, entryIdx, celStartX, celWidth, isSelected, selectedEntryIndices, timelineHoveredEntryIdx, clipboardEntries, entryHeight, frameWidth);
         handleTimelineEntryEdges(drawList, winPos, syncScroll, entryIdx, celStartX, celWidth,
             resizeState, frameIndex, entry, entryHeight);
         drawTimelineEntryLabel(drawList, winPos, syncScroll, entry.celName, celStartX, celWidth, entryHeight);
@@ -702,7 +702,7 @@ void Sofanthiel::drawTimelineEntries(Animation& anim, ImDrawList* drawList, cons
 void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2& winPos,
     float syncScroll, int entryIdx, float celStartX, float celWidth,
     bool isSelected, std::vector<int>& selectedEntryIndices, int& hoveredEntryIdx,
-    std::vector<AnimationEntry>& clipboardEntries, float entryHeight)
+    std::vector<AnimationEntry>& clipboardEntries, float entryHeight, int frameWidth)
 {
     ImRect entryRect = getTimelineEntryRect(winPos, syncScroll, celStartX, celWidth, entryHeight);
     ImRect handleRect = getTimelineHandleRect(entryRect, entryHeight);
@@ -729,6 +729,15 @@ void Sofanthiel::drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2&
             isSelected &&
             !ImGui::GetIO().KeyCtrl &&
             !ImGui::GetIO().KeyShift;
+
+        if (!isHandleHovered) {
+            int celFrameStart = static_cast<int>(std::round(celStartX / frameWidth));
+            float mouseX = ImGui::GetIO().MousePos.x;
+            float localX = mouseX - (winPos.x + celStartX - syncScroll);
+            int clickedFrameOffset = static_cast<int>(localX / frameWidth);
+            int celDuration = static_cast<int>(std::round(celWidth / frameWidth));
+            currentFrame = celFrameStart + ImClamp(clickedFrameOffset, 0, celDuration - 1);
+        }
 
         if (!preserveSelectionForHandleDrag) {
             if (ImGui::GetIO().KeyCtrl) {

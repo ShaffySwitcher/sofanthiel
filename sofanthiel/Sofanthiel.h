@@ -124,7 +124,7 @@ private:
     void drawTimelineEntryBackground(ImDrawList* drawList, const ImVec2& winPos,
         float syncScroll, int entryIdx, float celStartX, float celWidth,
         bool isSelected, std::vector<int>& selectedEntryIndices, int& hoveredEntryIdx,
-        std::vector<AnimationEntry>& clipboardEntries, float entryHeight);
+        std::vector<AnimationEntry>& clipboardEntries, float entryHeight, int frameWidth);
     void handleTimelineEntryEdges(ImDrawList* drawList, const ImVec2& winPos, float syncScroll, int entryIdx, float celStartX, float celWidth, TimelineResizeState& resizeState, int frameIndex, AnimationEntry& entry, float entryHeight);
     void drawTimelineEntryLabel(ImDrawList* drawList, const ImVec2& winPos, float syncScroll, const std::string& celName, float celStartX, float celWidth, float entryHeight);
     void drawTimelineFrameCels(ImDrawList* drawList, const ImVec2& winPos, float syncScroll, int frameStartIndex, int duration, float frameWidth, float entryHeight);
